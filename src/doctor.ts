@@ -8,6 +8,7 @@
  *   (which load the plugin from the package) run the same harness.
  * - Files the harness reads exist (AGENTS.md, PROGRESS.md, the init script, the evaluator rubric,
  *   the generator notes file when configured).
+ * - The init script is committed executable (`harness check` runs this one too).
  * - No leftover copies of the old in-repo harness (they would run their hooks twice).
  */
 import { existsSync, readFileSync } from 'node:fs'
@@ -15,7 +16,7 @@ import path from 'node:path'
 
 import { loadProject, type Project } from './config'
 import { readFeatureList } from './feature-list'
-import { PACKAGE_ROOT } from './run'
+import { PACKAGE_ROOT, sh } from './run'
 
 export const MARKETPLACE = 'eemelinen-harness'
 export const PLUGIN_KEY = `harness@${MARKETPLACE}`
@@ -56,6 +57,19 @@ const legacyCopies = [
   '.claude/skills/verify-feature/SKILL.md',
   '.claude/agents/evaluator.md',
 ]
+
+/**
+ * The skills, templates and humans run `./init.sh` directly, which fails with "Permission denied"
+ * on Linux and macOS when the script is committed as 100644 — the default from a Windows checkout,
+ * where git does not record the executable bit. Undefined outside git or for an untracked script.
+ */
+export function initModeProblem(project: Project): string | undefined {
+  const init = path.relative(project.root, project.resolve(project.config.project.init))
+  const res = sh('git', ['ls-files', '--stage', '--', init], { cwd: project.root, quiet: true })
+  const mode = res.code === 0 ? res.out.split(/\s/)[0] : ''
+  if (!mode || mode === '100755') return undefined
+  return `${init} is committed as ${mode}, so ./${init} fails on Linux and macOS; run: git update-index --chmod=+x ${init}`
+}
 
 export function doctor(
   project: Project,
@@ -117,6 +131,8 @@ export function doctor(
   const missing = required.filter((f) => !existsSync(project.resolve(f)))
   if (missing.length === 0) add('ok', `project files present (${required.join(', ')})`)
   else add('error', `missing project files: ${missing.join(', ')}`)
+  const initProblem = initModeProblem(project)
+  if (initProblem) add('error', initProblem)
 
   const leftovers = legacyCopies.filter((f) => existsSync(project.resolve(f)))
   if (leftovers.length > 0)
