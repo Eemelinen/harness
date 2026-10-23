@@ -42,7 +42,7 @@ import {
   type CiCheck,
 } from './ci'
 import { cleanState } from './clean-state'
-import { loadProject, worktreeRoot, type HarnessConfig, type Project } from './config'
+import { CONFIG_FILE, loadProject, worktreeRoot, type HarnessConfig, type Project } from './config'
 import { doctor } from './doctor'
 import { describeEvent, heartbeat, newStreamState } from './events'
 import {
@@ -64,6 +64,7 @@ import {
   runRetro,
   type IntakeItem,
 } from './retro'
+import { hardStops, parseSafetyVerdict, type SafetyVerdict, type Snapshot } from './review'
 import { PACKAGE_ROOT, sh as run, shellLine } from './run'
 
 export const PLUGIN_NAME = 'harness'
@@ -666,6 +667,9 @@ async function runFeature(
         `  claude -p "<evaluator prompt>" --plugin-dir ${plugin} --append-system-prompt "<plugin agents/evaluator.md body>" --tools ${evaluatorAgent(plugin).tools} --permission-mode ${config.generator.permissionMode} --permission-prompts none --max-turns ${config.evaluator.maxTurns} --max-budget-usd ${config.evaluator.maxBudgetUsd} --model ${config.evaluator.model}${config.evaluator.effort ? ` --effort ${config.evaluator.effort}` : ''} --output-format json --json-schema <prompts/evaluator-schema.json>`,
       )
       log(
+        `would then: merge gate — a branch that changes reviewPaths ${config.review.mode === 'human' ? 'waits for a human' : 'gets a safety review session (hard stops wait for a human)'}`,
+      )
+      log(
         `would then: git push -u ${remote()} ${branchFor(id)} && gh pr create --base ${defaultBranch()} --head ${branchFor(id)} …; merge policy ${opts.autoMerge ? 'auto' : config.merge}`,
       )
       log(
@@ -798,8 +802,10 @@ async function runFeature(
       return 'blocked'
     }
 
-    // Accept → publish.
-    const { url: pr, review } = publish(
+    // Accept → the merge gate, then publish.
+    const gate = await reviewGate(id, feature, dir, intake?.safety)
+    const review = gate.hold
+    const { url: pr } = publish(
       id,
       dir,
       feature,
@@ -812,6 +818,7 @@ async function runFeature(
       },
       opts,
       intake,
+      gate,
     )
     record({
       ts: new Date().toISOString(),
@@ -820,7 +827,7 @@ async function runFeature(
       outcome: pr ? 'pr' : 'pushed',
       verdict: 'Accept',
       pr,
-      costUsd: cost + evalCost,
+      costUsd: cost + evalCost + gate.cost,
       turns,
       minutes: minutes(),
       trace: traceFile,
@@ -841,6 +848,7 @@ async function runFeature(
         auto: opts.autoMerge || config.merge === 'auto',
         attempt,
         started,
+        safety: intake?.safety,
       })
       if (end !== 'merged') return end
       removeWorktree(id)
@@ -926,27 +934,21 @@ function publish(
   verdict: Verdict,
   stats: { cost: number; turns: number; trace: string },
   opts: Options,
-  intake?: IntakeItem,
-): { url?: string; review: string[] } {
+  intake: IntakeItem | undefined,
+  gate: Gate,
+): { url?: string } {
   pushBranch(id, dir)
-  const changed = sh('git', ['diff', '--name-only', `${defaultBranch()}...HEAD`], {
-    cwd: dir,
-    quiet: true,
-  }).out
-  const review = reviewReasons(
-    changed.split('\n').filter(Boolean),
-    config.reviewPaths,
-    intake?.safety,
-  )
+  const review = gate.hold
   if (!ghAvailable()) {
     log(`gh is not available; branch ${branchFor(id)} pushed — open the PR by hand`)
-    return { review }
+    return {}
   }
   const body = [
     ...(intake ? [`Closes #${intake.issue} (harness retro).`, ''] : []),
     ...(review.length > 0
       ? ['> **Waits for a human review** — not auto-merged:', ...review.map((r) => `> - ${r}`), '']
       : []),
+    ...(gate.notes.length > 0 ? [...gate.notes, ''] : []),
     `## ${id} — ${feature.title}`,
     '',
     feature.user_visible_behavior,
@@ -980,7 +982,7 @@ function publish(
   )
   if (r.code !== 0) {
     log(`gh pr create failed: ${r.err}`)
-    return { review }
+    return {}
   }
   const url = r.out.split('\n').find((l) => l.startsWith('https://')) ?? r.out
   log(`PR opened: ${url}`)
@@ -993,7 +995,146 @@ function publish(
     })
     if (m.code !== 0) log(`gh pr merge --auto failed: ${m.err}`)
   }
-  return { url, review }
+  return { url }
+}
+
+// ---------------------------------------------------------------------------------------
+// Merge gate (src/review.ts)
+// ---------------------------------------------------------------------------------------
+
+interface Gate {
+  /** Why the PR waits for a human; empty when it may auto-merge. */
+  hold: string[]
+  /** PR body lines for a passed safety review. */
+  notes: string[]
+  cost: number
+}
+
+function changedFiles(dir: string): string[] {
+  return sh('git', ['diff', '--name-only', `${defaultBranch()}...HEAD`], { cwd: dir, quiet: true })
+    .out.split('\n')
+    .filter(Boolean)
+}
+
+/** The JSON files a hard stop compares, at `ref`; `null` when a file does not parse. */
+function snapshot(dir: string, ref: string): Snapshot {
+  const read = (file: string): unknown => {
+    const r = sh('git', ['show', `${ref}:${file}`], { cwd: dir, quiet: true })
+    if (r.code !== 0) return undefined
+    try {
+      return JSON.parse(r.out) as unknown
+    } catch {
+      return null
+    }
+  }
+  return {
+    config: read(CONFIG_FILE),
+    settings: read('.claude/settings.json'),
+    settingsLocal: read('.claude/settings.local.json'),
+  }
+}
+
+/**
+ * May this branch auto-merge? Changes outside `reviewPaths` (from a non-safety issue) may. Others
+ * wait with `review.mode: human`; with `evaluate` a hard stop holds them, else the safety review
+ * decides. The driver's own config applies, not the branch's, so a PR cannot loosen its own gate.
+ */
+async function reviewGate(
+  id: string,
+  feature: Feature,
+  dir: string,
+  safety?: boolean,
+): Promise<Gate> {
+  const files = changedFiles(dir)
+  const reasons = reviewReasons(files, config.reviewPaths, safety)
+  if (reasons.length === 0) return { hold: [], notes: [], cost: 0 }
+  if (config.review.mode === 'human') return { hold: reasons, notes: [], cost: 0 }
+  const stops = hardStops(snapshot(dir, defaultBranch()), snapshot(dir, 'HEAD'))
+  if (stops.length > 0) {
+    log(`merge gate: never auto-merged: ${stops.join('; ')}`)
+    return {
+      hold: [...reasons, ...stops.map((s) => `never auto-merged: ${s}`)],
+      notes: [],
+      cost: 0,
+    }
+  }
+  const { verdict, cost } = await runSafetyReview(id, feature, dir, reasons, files)
+  if (verdict?.verdict === 'safe')
+    return {
+      hold: [],
+      notes: [
+        `### Safety review: safe`,
+        '',
+        `Reviewed because: ${reasons.join('; ')}.`,
+        ...verdict.reasons.map((r) => `- ${r}`),
+      ],
+      cost,
+    }
+  const why = verdict
+    ? verdict.reasons.map((r) => `safety review: ${r}`)
+    : ['safety review gave no verdict']
+  return { hold: [...reasons, ...why], notes: [], cost }
+}
+
+const MAX_REVIEW_DIFF = 60_000
+
+async function runSafetyReview(
+  id: string,
+  feature: Feature,
+  dir: string,
+  reasons: string[],
+  files: string[],
+): Promise<{ verdict?: SafetyVerdict; cost: number }> {
+  const base = defaultBranch()
+  const model = config.review.model ?? config.evaluator.model
+  const effort = config.review.effort ?? config.evaluator.effort
+  log(`=== ${id}: safety review (${model}): ${reasons.join('; ')}`)
+  // The files that triggered the review; a safety-flagged issue that touched none gets the full diff.
+  const reviewed = files.filter((f) => reviewReasons([f], config.reviewPaths).length > 0)
+  let diff = sh('git', ['diff', `${base}...HEAD`, '--', ...reviewed], { cwd: dir, quiet: true }).out
+  if (diff.length > MAX_REVIEW_DIFF)
+    diff = `${diff.slice(0, MAX_REVIEW_DIFF)}\n… (truncated; read the files for the rest)`
+  const prompt = render(promptFile('safety-review.md'), {
+    PROJECT_NAME: config.project.name,
+    FEATURE_ID: id,
+    FEATURE_TITLE: feature.title,
+    REASONS: reasons.map((r) => `- ${r}`).join('\n'),
+    BASE: base,
+    STAT: sh('git', ['diff', '--stat', `${base}...HEAD`], { cwd: dir, quiet: true }).out,
+    DIFF: diff,
+  })
+  const res = await runClaude({
+    cwd: dir,
+    args: [
+      '-p',
+      prompt,
+      '--tools',
+      'Read,Glob,Grep',
+      '--permission-mode',
+      config.generator.permissionMode,
+      '--permission-prompts',
+      'none',
+      '--max-turns',
+      String(config.review.maxTurns),
+      '--max-budget-usd',
+      String(config.review.maxBudgetUsd),
+      '--model',
+      model,
+      ...(effort ? ['--effort', effort] : []),
+      '--output-format',
+      'json',
+      '--json-schema',
+      promptFile('safety-review-schema.json'),
+    ],
+    env: { HARNESS_LOOP: '1' },
+    traceFile: path.join(ROOT, config.traceDir, `${id}-${stamp()}.safety.json`),
+    wallClockMs: config.review.wallClockMin * 60_000,
+    stream: false,
+  })
+  const verdict = parseSafetyVerdict(res.result)
+  log(`safety review finished: ${describeResult(res)} → ${verdict?.verdict ?? 'no verdict'}`)
+  for (const r of verdict?.reasons ?? []) log(`  ${r.replace(/\s+/g, ' ').slice(0, 200)}`)
+  return { verdict, cost: Number(res.result?.total_cost_usd ?? 0) }
 }
 
 type WaitResult =
@@ -1059,6 +1200,8 @@ interface PrRun {
   /** The generator attempt that produced the PR (for the run log). */
   attempt: number
   started: number
+  /** Built from a retro issue marked as a safety change. */
+  safety?: boolean
 }
 
 /** Log excerpts of the failed jobs, one block per workflow run. */
@@ -1246,6 +1389,15 @@ async function shepherdPr(run: PrRun): Promise<'merged' | 'blocked' | 'aborted'>
     const ev = await runEvaluator(id, feature, dir, plugin, ciContext)
     const total = cost + ev.cost
     if (ev.verdict?.verdict === 'Accept') {
+      // Auto-merge is armed: a fix that now needs review must not reach the PR unreviewed.
+      const gate = await reviewGate(id, feature, dir, run.safety)
+      if (gate.hold.length > 0)
+        return giveUp(run, `the CI fix needs a human review: ${gate.hold.join('; ')}`, evidence, {
+          costUsd: total + gate.cost,
+          turns,
+          trace: traceFile,
+          verdict: 'Accept',
+        })
       if (!pushBranch(id, dir)) return giveUp(run, 'git push of the CI fix failed', evidence)
       pushedHead = must('git', ['rev-parse', 'HEAD'], 'git rev-parse', dir)
       record({

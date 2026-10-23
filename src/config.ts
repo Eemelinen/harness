@@ -194,12 +194,25 @@ export const configSchema = z.object({
   worktreeRoot: z.string().min(1).optional(),
   merge: z.enum(['wait', 'auto', 'none']).default('wait'),
   /**
-   * Repo-relative globs (`*` matches across `/`) of files that change what sessions may do. A loop
-   * PR that touches one is never auto-merged; it waits for a human (docs/self-improvement.md).
+   * Repo-relative globs (`*` matches across `/`) of files that change what sessions may do or what
+   * gets verified. A loop PR that touches one goes through `review` before it may auto-merge
+   * (docs/self-improvement.md → Safety). Add project hooks that live elsewhere.
    */
   reviewPaths: z
     .array(z.string().min(1))
-    .default(['.claude/settings.json', '.claude/settings.local.json', 'harness.config.json']),
+    .default(['.claude/*', '.github/workflows/*', 'harness.config.json']),
+  /** How a PR that needs review merges: `evaluate` (a safety review decides) or `human`. */
+  review: z
+    .object({
+      mode: z.enum(['evaluate', 'human']).default('evaluate'),
+      /** The safety-review session; the model defaults to `evaluator.model`. */
+      model: z.string().min(1).optional(),
+      effort: effort.optional(),
+      maxTurns: z.number().int().positive().default(30),
+      maxBudgetUsd: z.number().positive().default(2),
+      wallClockMin: z.number().positive().default(15),
+    })
+    .prefault({}),
   /** The loop's look back at its own runs (`harness retro`, docs/self-improvement.md). */
   retro: z
     .object({

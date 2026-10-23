@@ -7,8 +7,14 @@
   },
   "services": null,
   "milestones": [
-    { "pattern": "pnpm check(?:\\s|$)", "label": "L1 pnpm check" },
-    { "pattern": "pnpm test(?:\\s|$)", "label": "L1 pnpm test" }
+    {
+      "pattern": "pnpm check(?:\\s|$)",
+      "label": "L1 pnpm check"
+    },
+    {
+      "pattern": "pnpm test(?:\\s|$)",
+      "label": "L1 pnpm test"
+    }
   ],
   "guard": {
     "bash": [
@@ -57,9 +63,17 @@
   "sessionStart": {
     "hint": "Clock-in: AGENTS.md → Clock-in (or /harness:clock-in). Layer: pnpm check (L1: typecheck, format, harness check, tests)."
   },
-  "prompts": { "generatorNotes": "docs/harness/generator-notes.md" },
-  "generator": { "model": "claude-opus-5-5", "effort": "high" },
-  "evaluator": { "model": "claude-opus-5-5", "effort": "high" },
+  "prompts": {
+    "generatorNotes": "docs/harness/generator-notes.md"
+  },
+  "generator": {
+    "model": "claude-opus-5-5",
+    "effort": "high"
+  },
+  "evaluator": {
+    "model": "claude-opus-5-5",
+    "effort": "high"
+  },
   "allowedTools": [
     "Bash(pnpm check*)",
     "Bash(pnpm typecheck)",
@@ -84,8 +98,7 @@
   ],
   "merge": "auto",
   "reviewPaths": [
-    ".claude/settings.json",
-    ".claude/settings.local.json",
+    ".claude/*",
     "harness.config.json",
     "package.json",
     ".github/workflows/*",
@@ -94,8 +107,12 @@
     "prompts/*",
     "src/config.ts",
     "src/loop.ts",
-    "src/retro.ts"
+    "src/retro.ts",
+    "src/review.ts"
   ],
+  "review": {
+    "mode": "human"
+  },
   "retro": {
     "onQueueEmpty": true,
     "intake": true

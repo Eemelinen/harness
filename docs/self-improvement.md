@@ -15,7 +15,7 @@ loop runs features ──► traces, driver logs, runs.jsonl
         │             (the harness repository, or this project for its own setup)
         │                       │
         └── retro.intake: the owning repository's loop turns the issue into a feature,
-            builds it on its branch, evaluator, PR "Closes #N", auto-merge unless it needs review
+            builds it on its branch, evaluator, PR "Closes #N", merge gate, auto-merge
 ```
 
 ## What happens in a retro
@@ -61,20 +61,34 @@ Retro issues run before the feature list's own ready features. To change what th
 edit the `harness-feature` block in the issue before it is queued. To reject a finding, close the
 issue as not planned: the retro will not file it again.
 
-## Safety: what never merges on its own
+## Safety: the merge gate
 
-A self-improving loop must not be able to widen its own permissions. A loop PR does not get
-auto-merge, and the loop does not wait for it, when:
+A self-improving loop must not be able to widen its own limits. Every loop PR passes a merge gate
+before auto-merge is armed (`src/review.ts`). It needs review when:
 
-- it changes a file under `reviewPaths` (default: `.claude/settings.json`,
-  `.claude/settings.local.json`, `harness.config.json`). This applies to every loop PR, not only
-  retro ones.
+- it changes a file under `reviewPaths` (default: `.claude/*`, `.github/workflows/*`,
+  `harness.config.json`; add project hooks that live elsewhere). This applies to every loop PR, not
+  only retro ones.
 - it comes from a retro issue marked as a safety change: the fix touches the guard, permissions,
   allowedTools, hooks, `reviewPaths`, the evaluator's tools, or the retro and intake themselves.
 
-The PR body says why, the driver notifies you, and the loop continues with features that do not
-depend on it. The harness repository lists its own guard, hooks, prompts and retro code in its
-`reviewPaths`.
+What happens then depends on `review.mode`:
+
+- **`evaluate`** (the default; for projects): first the **hard stops**, checked in code, not by a
+  model. These never auto-merge: `reviewPaths` shrinking, `review` changing,
+  `generator.permissionMode` changing, an `allowedTools` or `permissions.allow` entry that allows
+  every command, deny rules removed, `defaultMode: bypassPermissions`, the harness plugin disabled,
+  `harness.config.json` no longer parsing. Otherwise a read-only **safety review** session
+  (`prompts/safety-review.md`) reads the changes and answers one question: can unattended sessions
+  now do something harmful they could not do before (destructive or outward-facing commands,
+  weaker verification, exposed secrets)? `safe` → auto-merge, with the review in the PR body.
+  `unsafe` or no verdict → the PR waits for a human.
+- **`human`** (the harness repository): the PR always waits for a human.
+
+The gate uses the driver's own config, not the branch's, so a PR cannot loosen its own gate. A CI
+fix on an auto-merge PR passes the same gate before it is pushed; if it now needs a human, the
+driver disables auto-merge and hands the PR over. A held PR's body says why, the driver notifies
+you, and the loop continues with features that do not depend on it.
 
 Harness fixes reach a project only when you cut a release and move the project's pins
 ([developing.md](developing.md)), so a fix the loop got wrong cannot spread to a running loop

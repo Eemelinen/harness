@@ -638,14 +638,58 @@
     },
     "reviewPaths": {
       "default": [
-        ".claude/settings.json",
-        ".claude/settings.local.json",
+        ".claude/*",
+        ".github/workflows/*",
         "harness.config.json"
       ],
       "type": "array",
       "items": {
         "type": "string",
         "minLength": 1
+      }
+    },
+    "review": {
+      "default": {},
+      "type": "object",
+      "properties": {
+        "mode": {
+          "default": "evaluate",
+          "type": "string",
+          "enum": [
+            "evaluate",
+            "human"
+          ]
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "effort": {
+          "type": "string",
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ]
+        },
+        "maxTurns": {
+          "default": 30,
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "maxBudgetUsd": {
+          "default": 2,
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "wallClockMin": {
+          "default": 15,
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
       }
     },
     "retro": {
