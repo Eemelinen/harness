@@ -171,6 +171,12 @@ Run these in order. All must pass.
    Without protection, `merge: "auto"` merges before CI runs.
 
 4. **Log in to GitHub CLI.** `gh auth login`; the token needs `repo` and `workflow`.
+5. **Make local verification match CI.** When CI fails on a driver PR, the driver runs a fixer
+   session ([how-it-works.md](how-it-works.md#4-operating-the-loop)). That costs a session and a CI
+   round. It is cheaper to catch the failure before the PR exists. Every CI step whose settings
+   differ from the local layers should have a local twin in L1 or in the clock-out. Example: CI builds
+   with `SKIP_ENV_VALIDATION=1` and placeholder env, so add a `build:ci` script that runs the same
+   build with the same env. Metsävahti F-048 passed L1–L3 locally and failed exactly that build in CI.
 
 ## 5. Prompt for an agent doing the adoption
 

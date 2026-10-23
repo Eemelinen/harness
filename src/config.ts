@@ -173,6 +173,8 @@ export const configSchema = z.object({
       maxBudgetUsd: z.number().positive().default(15),
       wallClockMin: z.number().positive().default(60),
       maxConsecutiveFailures: z.number().int().positive().default(2),
+      /** Fixer sessions per PR after a failed CI check on an auto-merge PR; 0 gives up at once. */
+      maxCiFixAttempts: z.number().int().nonnegative().default(2),
     })
     .prefault({}),
   generator: z.object({

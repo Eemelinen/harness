@@ -3,6 +3,20 @@
 Releases are git tags (`vX.Y.Z`). Projects pin the package and the plugin marketplace to the same
 tag; see [docs/developing.md](docs/developing.md).
 
+## Unreleased
+
+- **The loop fixes red CI on its own PRs.** Before, a failed required check on an auto-merge PR
+  stopped the loop until a human fixed the branch.
+  - The driver now passes the failed-job log excerpt to a fixer session in the feature's worktree
+    (`prompts/ci-fixer.md`).
+  - Fix commits go through the post-check and the evaluator, then are pushed.
+  - Flaky and cancelled jobs are re-run once.
+  - After `caps.maxCiFixAttempts` (default 2) the driver disables auto-merge, comments on the PR and
+    moves on to independent features.
+  - Fixer sessions show in `harness report` as `ci-fix` / `ci-rerun`.
+- **The loop no longer waits forever on silent CI.** With auto-merge, a PR whose CI reports nothing
+  for 20 minutes is given up the same way.
+
 ## v0.1.0 — 2026-10-23
 
 First release, extracted from the copies in Metsävahti, Personal Finances and Ideaforge.

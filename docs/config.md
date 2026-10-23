@@ -169,12 +169,13 @@ spec and design, where deviations are recorded, project-specific "never run" rul
 
 ## Driver keys
 
-| Key                                                                                  | Default                                  | Meaning                                                                      |
-| ------------------------------------------------------------------------------------ | ---------------------------------------- | ---------------------------------------------------------------------------- |
-| `caps.maxAttempts / maxTurns / maxBudgetUsd / wallClockMin / maxConsecutiveFailures` | 2 / 200 / 15 / 60 / 2                    | Per generator session; attempts per feature; failures before the loop stops. |
-| `generator.model` (required), `permissionMode`, `effort`                             | — / `auto` / —                           | The implementing session.                                                    |
-| `evaluator.model` (required), `effort`, `maxTurns`, `maxBudgetUsd`, `wallClockMin`   | — / — / 60 / 4 / 15                      | The grading session.                                                         |
-| `allowedTools`                                                                       | `[]`                                     | `--allowedTools` for generator sessions.                                     |
-| `worktreeRoot`                                                                       | `../<repo>-worktrees`                    | One worktree per feature.                                                    |
-| `merge`                                                                              | `"wait"`                                 | `auto` (needs branch protection), `wait` (a human merges), `none`.           |
-| `traceDir`, `runsLog`                                                                | `.harness/traces`, `.harness/runs.jsonl` | Gitignore `.harness/`.                                                       |
+| Key                                                                                  | Default                                  | Meaning                                                                                              |
+| ------------------------------------------------------------------------------------ | ---------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `caps.maxAttempts / maxTurns / maxBudgetUsd / wallClockMin / maxConsecutiveFailures` | 2 / 200 / 15 / 60 / 2                    | Per generator session; attempts per feature; failures before the loop stops.                         |
+| `caps.maxCiFixAttempts`                                                              | 2                                        | CI fixer sessions per auto-merge PR (they use the generator caps); `0` gives up on the first red CI. |
+| `generator.model` (required), `permissionMode`, `effort`                             | — / `auto` / —                           | The implementing session.                                                                            |
+| `evaluator.model` (required), `effort`, `maxTurns`, `maxBudgetUsd`, `wallClockMin`   | — / — / 60 / 4 / 15                      | The grading session.                                                                                 |
+| `allowedTools`                                                                       | `[]`                                     | `--allowedTools` for generator sessions.                                                             |
+| `worktreeRoot`                                                                       | `../<repo>-worktrees`                    | One worktree per feature.                                                                            |
+| `merge`                                                                              | `"wait"`                                 | `auto` (needs branch protection), `wait` (a human merges), `none`.                                   |
+| `traceDir`, `runsLog`                                                                | `.harness/traces`, `.harness/runs.jsonl` | Gitignore `.harness/`.                                                                               |

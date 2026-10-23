@@ -26,6 +26,7 @@ describe('harness.config.json', () => {
       rmAllow: ['/tmp/', 'node_modules', 'coverage'],
     })
     expect(config.caps.maxAttempts).toBe(2)
+    expect(config.caps.maxCiFixAttempts).toBe(2)
     expect(config.merge).toBe('wait')
     expect(config.format).toMatch(/prettier/)
   })
@@ -34,6 +35,11 @@ describe('harness.config.json', () => {
     const config = parseConfig({ ...minimal, services: null, format: null })
     expect(config.services).toBeNull()
     expect(config.format).toBeNull()
+  })
+
+  it('allows turning the CI fixer off', () => {
+    expect(parseConfig({ ...minimal, caps: { maxCiFixAttempts: 0 } }).caps.maxCiFixAttempts).toBe(0)
+    expect(() => parseConfig({ ...minimal, caps: { maxCiFixAttempts: -1 } })).toThrow(/caps/)
   })
 
   it('rejects unknown values and invalid regular expressions with the path', () => {

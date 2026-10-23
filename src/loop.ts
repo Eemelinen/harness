@@ -31,6 +31,16 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { parseArgs } from 'node:util'
 
+import {
+  decideCiFix,
+  describeChecks,
+  isFailed,
+  logExcerpt,
+  parseChecks,
+  parseFixVerdict,
+  runIds,
+  type CiCheck,
+} from './ci'
 import { cleanState } from './clean-state'
 import { loadProject, worktreeRoot, type HarnessConfig, type Project } from './config'
 import { doctor } from './doctor'
@@ -107,6 +117,8 @@ export function render(template: string, vars: Record<string, string>): string {
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
+
+const stamp = () => new Date().toISOString().replace(/[:.]/g, '-')
 
 const defaultBranch = () => config.project.defaultBranch
 const remote = () => config.project.remote
@@ -430,6 +442,63 @@ function verdictMarkdown(v: Verdict): string {
   return `### Evaluator verdict: ${v.verdict}\n\n| Category | Score |\n| --- | --- |\n${rows || '| (unstructured) | – |'}\n\n${findings || '_no findings_'}\n\n${follow ? `Required follow-up:\n${follow}` : ''}`
 }
 
+/**
+ * One evaluator session: fresh context, read-only. `--agent` ignores `--json-schema`, so the
+ * agent file's instructions and tool list are passed directly (see evaluatorAgent()).
+ */
+async function runEvaluator(
+  id: string,
+  feature: Feature,
+  dir: string,
+  plugin: string,
+  context = '',
+): Promise<{ verdict?: Verdict; cost: number }> {
+  log(`=== ${id}: evaluator session (${config.evaluator.model})`)
+  const agent = evaluatorAgent(plugin)
+  const evalArgs = [
+    '-p',
+    render(promptFile('evaluator.md'), {
+      FEATURE_ID: id,
+      FEATURE_TITLE: feature.title,
+      BASE: `${remote()}/${defaultBranch()}`,
+      CONTEXT: context,
+    }),
+    '--plugin-dir',
+    plugin,
+    '--append-system-prompt',
+    agent.instructions,
+    '--tools',
+    agent.tools,
+    '--permission-mode',
+    config.generator.permissionMode,
+    '--permission-prompts',
+    'none',
+    '--max-turns',
+    String(config.evaluator.maxTurns),
+    '--max-budget-usd',
+    String(config.evaluator.maxBudgetUsd),
+    '--model',
+    config.evaluator.model,
+    ...(config.evaluator.effort ? ['--effort', config.evaluator.effort] : []),
+    '--output-format',
+    'json',
+    '--json-schema',
+    promptFile('evaluator-schema.json'),
+  ]
+  const ev = await runClaude({
+    cwd: dir,
+    args: evalArgs,
+    env: { HARNESS_LOOP: '1' },
+    traceFile: path.join(ROOT, config.traceDir, `${id}-${stamp()}.evaluator.json`),
+    wallClockMs: config.evaluator.wallClockMin * 60_000,
+    stream: false,
+  })
+  const verdict = parseVerdict(ev.result)
+  log(`evaluator finished: ${describeResult(ev)} → ${verdict?.verdict ?? 'no verdict'}`)
+  if (verdict) for (const line of verdictLines(verdict)) log(`  ${line}`)
+  return { verdict, cost: Number(ev.result?.total_cost_usd ?? 0) }
+}
+
 // ---------------------------------------------------------------------------------------
 // Run log
 // ---------------------------------------------------------------------------------------
@@ -438,7 +507,7 @@ interface RunRecord {
   ts: string
   feature: string
   attempt: number
-  outcome: 'pr' | 'merged' | 'blocked' | 'failed' | 'aborted' | 'pushed'
+  outcome: 'pr' | 'merged' | 'blocked' | 'failed' | 'aborted' | 'pushed' | 'ci-fix' | 'ci-rerun'
   verdict?: string
   pr?: string
   costUsd: number
@@ -478,13 +547,45 @@ function report() {
 // Prompts
 // ---------------------------------------------------------------------------------------
 
-function generatorTemplate(): string {
-  const template = readFileSync(path.join(PACKAGE_ROOT, 'prompts', 'generator.md'), 'utf8')
+const promptFile = (name: string) => readFileSync(path.join(PACKAGE_ROOT, 'prompts', name), 'utf8')
+
+function projectNotes(): string {
   const notesFile = config.prompts.generatorNotes
   const notes = notesFile ? readFileSync(path.join(ROOT, notesFile), 'utf8').trim() : ''
-  return render(template, {
+  return notes ? `\nProject notes (\`${notesFile}\`):\n\n${notes}\n` : ''
+}
+
+/** Arguments of a working session (generator or CI fixer): streamed, plugin loaded, generator caps. */
+function sessionArgs(prompt: string, plugin: string): string[] {
+  return [
+    '-p',
+    prompt,
+    '--plugin-dir',
+    plugin,
+    '--permission-mode',
+    config.generator.permissionMode,
+    '--permission-prompts',
+    'none',
+    '--max-turns',
+    String(config.caps.maxTurns),
+    '--max-budget-usd',
+    String(config.caps.maxBudgetUsd),
+    '--model',
+    config.generator.model,
+    ...(config.generator.effort ? ['--effort', config.generator.effort] : []),
+    '--output-format',
+    'stream-json',
+    '--verbose',
+    '--include-hook-events',
+    '--allowedTools',
+    ...config.allowedTools,
+  ]
+}
+
+function generatorTemplate(): string {
+  return render(promptFile('generator.md'), {
     PROJECT_NAME: config.project.name,
-    PROJECT_NOTES: notes ? `\nProject notes (\`${notesFile}\`):\n\n${notes}\n` : '',
+    PROJECT_NOTES: projectNotes(),
     FEATURE_ID: '{{FEATURE_ID}}',
     FEATURE_TITLE: '{{FEATURE_TITLE}}',
     ATTEMPT: '{{ATTEMPT}}',
@@ -502,7 +603,6 @@ type IterationOutcome = 'done' | 'blocked' | 'failed' | 'aborted'
 async function runFeature(feature: Feature, opts: Options): Promise<IterationOutcome> {
   const id = feature.id
   const started = Date.now()
-  const stamp = () => new Date().toISOString().replace(/[:.]/g, '-')
   if (!opts.dryRun) {
     logFile = path.join(ROOT, config.traceDir, `${id}-${stamp()}.log`)
     mkdirSync(path.dirname(logFile), { recursive: true })
@@ -511,8 +611,6 @@ async function runFeature(feature: Feature, opts: Options): Promise<IterationOut
   const dir = ensureWorktree(id, opts.dryRun)
   const plugin = pluginDir(opts.dryRun ? ROOT : dir)
   const template = generatorTemplate()
-  const evaluatorTemplate = readFileSync(path.join(PACKAGE_ROOT, 'prompts', 'evaluator.md'), 'utf8')
-  const schema = readFileSync(path.join(PACKAGE_ROOT, 'prompts', 'evaluator-schema.json'), 'utf8')
   const maxAttempts = feature.max_attempts ?? config.caps.maxAttempts
   let context = ''
   let attempt = feature.attempts
@@ -526,29 +624,7 @@ async function runFeature(feature: Feature, opts: Options): Promise<IterationOut
       MAX_ATTEMPTS: String(maxAttempts),
       CONTEXT: context ? `\nContext from the previous attempt:\n${context}\n` : '',
     })
-    const generatorArgs = [
-      '-p',
-      prompt,
-      '--plugin-dir',
-      plugin,
-      '--permission-mode',
-      config.generator.permissionMode,
-      '--permission-prompts',
-      'none',
-      '--max-turns',
-      String(config.caps.maxTurns),
-      '--max-budget-usd',
-      String(config.caps.maxBudgetUsd),
-      '--model',
-      config.generator.model,
-      ...(config.generator.effort ? ['--effort', config.generator.effort] : []),
-      '--output-format',
-      'stream-json',
-      '--verbose',
-      '--include-hook-events',
-      '--allowedTools',
-      ...config.allowedTools,
-    ]
+    const generatorArgs = sessionArgs(prompt, plugin)
     const env = { HARNESS_LOOP: '1', HARNESS_STOP_GUARD: '1', HARNESS_FEATURE: id }
     const traceFile = path.join(ROOT, config.traceDir, `${id}-${stamp()}.generator.jsonl`)
 
@@ -569,6 +645,9 @@ async function runFeature(feature: Feature, opts: Options): Promise<IterationOut
       )
       log(
         `would then: git push -u ${remote()} ${branchFor(id)} && gh pr create --base ${defaultBranch()} --head ${branchFor(id)} …; merge policy ${opts.autoMerge ? 'auto' : config.merge}`,
+      )
+      log(
+        `with auto-merge, on a failed CI check: up to ${config.caps.maxCiFixAttempts} CI fixer session(s) in ${dir} (prompts/ci-fixer.md, same flags and env as the generator), evaluator, git push, wait again`,
       )
       return 'done'
     }
@@ -647,52 +726,7 @@ async function runFeature(feature: Feature, opts: Options): Promise<IterationOut
       `post-check ok: ${id} is ${check.status}, clean-state check passed, ${check.ahead} commit(s) ahead of ${defaultBranch()}`,
     )
 
-    // Evaluator: fresh context, read-only. `--agent` ignores `--json-schema`, so the agent
-    // file's instructions and tool list are passed directly (see evaluatorAgent()).
-    log(`=== ${id}: evaluator session (${config.evaluator.model})`)
-    const agent = evaluatorAgent(plugin)
-    const evalArgs = [
-      '-p',
-      render(evaluatorTemplate, {
-        FEATURE_ID: id,
-        FEATURE_TITLE: feature.title,
-        BASE: `${remote()}/${defaultBranch()}`,
-      }),
-      '--plugin-dir',
-      plugin,
-      '--append-system-prompt',
-      agent.instructions,
-      '--tools',
-      agent.tools,
-      '--permission-mode',
-      config.generator.permissionMode,
-      '--permission-prompts',
-      'none',
-      '--max-turns',
-      String(config.evaluator.maxTurns),
-      '--max-budget-usd',
-      String(config.evaluator.maxBudgetUsd),
-      '--model',
-      config.evaluator.model,
-      ...(config.evaluator.effort ? ['--effort', config.evaluator.effort] : []),
-      '--output-format',
-      'json',
-      '--json-schema',
-      schema,
-    ]
-    const evalTrace = path.join(ROOT, config.traceDir, `${id}-${stamp()}.evaluator.json`)
-    const ev = await runClaude({
-      cwd: dir,
-      args: evalArgs,
-      env: { HARNESS_LOOP: '1' },
-      traceFile: evalTrace,
-      wallClockMs: config.evaluator.wallClockMin * 60_000,
-      stream: false,
-    })
-    const verdict = parseVerdict(ev.result)
-    const evalCost = Number(ev.result?.total_cost_usd ?? 0)
-    log(`evaluator finished: ${describeResult(ev)} → ${verdict?.verdict ?? 'no verdict'}`)
-    if (verdict) for (const line of verdictLines(verdict)) log(`  ${line}`)
+    const { verdict, cost: evalCost } = await runEvaluator(id, feature, dir, plugin)
 
     if (!verdict || verdict.verdict === 'Revise') {
       const findings = verdict
@@ -769,7 +803,17 @@ async function runFeature(feature: Feature, opts: Options): Promise<IterationOut
       trace: traceFile,
     })
     if (pr && (config.merge !== 'none' || opts.autoMerge) && opts.wait) {
-      await waitForMerge(pr, opts.autoMerge || config.merge === 'auto')
+      const end = await shepherdPr({
+        pr,
+        id,
+        dir,
+        feature,
+        plugin,
+        auto: opts.autoMerge || config.merge === 'auto',
+        attempt,
+        started,
+      })
+      if (end !== 'merged') return end
       removeWorktree(id)
       must(
         'git',
@@ -817,9 +861,10 @@ function commitState(dir: string, subject: string) {
     log(`state commit failed: ${r.err || r.out}`)
 }
 
-function pushBranch(id: string, dir: string) {
+function pushBranch(id: string, dir: string): boolean {
   const r = sh('git', ['push', '-u', remote(), branchFor(id)], { cwd: dir, quiet: true })
   if (r.code !== 0) log(`git push failed: ${r.err}`)
+  return r.code === 0
 }
 
 function publish(
@@ -884,23 +929,33 @@ function publish(
   return url
 }
 
-async function waitForMerge(pr: string, auto: boolean) {
-  notify(`PR ready: ${pr}${auto ? ' (auto-merge armed)' : ' — merge it to let the loop continue'}`)
+type WaitResult =
+  { state: 'merged' } | { state: 'ci_failed'; failed: CiCheck[] } | { state: 'stalled' }
+
+/** With auto-merge, how long CI may report nothing new before the driver stops waiting. */
+const CI_STALL_MIN = 20
+
+/**
+ * Polls until the PR merges. With auto-merge, returns early when CI failed (auto-merge never
+ * fires on a red check) or reported nothing for CI_STALL_MIN minutes. Check results in `handled`
+ * were already acted on and are ignored; a push or a rerun gives the new jobs new links.
+ */
+async function waitForMerge(pr: string, auto: boolean, handled: Set<string>): Promise<WaitResult> {
   log(`waiting for ${auto ? 'CI and auto-merge' : 'a human merge'}: ${pr}`)
   const reported = new Set<string>()
   const waitStarted = Date.now()
+  let lastNews = Date.now()
   for (let poll = 0; ; poll++) {
-    const checks = sh('gh', ['pr', 'checks', pr, '--json', 'name,bucket'], { quiet: true })
-    let pending = 0
-    const failed: string[] = []
-    if (checks.out.startsWith('[')) {
-      for (const c of JSON.parse(checks.out) as { name: string; bucket: string }[]) {
-        if (c.bucket === 'pending') pending++
-        if (c.bucket === 'fail' || c.bucket === 'cancel') failed.push(c.name)
-        if (c.bucket !== 'pending' && !reported.has(c.name)) {
-          reported.add(c.name)
-          log(`${c.bucket === 'pass' ? '✓' : '✗'} CI ${c.name}: ${c.bucket}`)
-        }
+    const checks = parseChecks(
+      sh('gh', ['pr', 'checks', pr, '--json', 'name,bucket,link,workflow'], { quiet: true }).out,
+    ).filter((c) => !handled.has(c.link))
+    const pending = checks.filter((c) => c.bucket === 'pending').length
+    const failed = checks.filter(isFailed)
+    if (checks.length > 0) lastNews = Date.now()
+    for (const c of checks) {
+      if (c.bucket !== 'pending' && !reported.has(c.link)) {
+        reported.add(c.link)
+        log(`${c.bucket === 'pass' ? '✓' : '✗'} CI ${c.name}: ${c.bucket}`)
       }
     }
     const r = sh('gh', ['pr', 'view', pr, '--json', 'state,mergedAt'], { quiet: true })
@@ -908,16 +963,12 @@ async function waitForMerge(pr: string, auto: boolean) {
       const info = JSON.parse(r.out) as { state: string }
       if (info.state === 'MERGED') {
         log(`PR merged after ${Math.round((Date.now() - waitStarted) / 60000)} min: ${pr}`)
-        return
+        return { state: 'merged' }
       }
       if (info.state === 'CLOSED') throw new Error(`PR ${pr} was closed without merging`)
     }
-    // Auto-merge never fires on a red check, so waiting longer only hangs the loop. A fix pushed
-    // to the branch still merges the PR; the next loop run starts from the merged branch.
-    if (auto && pending === 0 && failed.length > 0) {
-      notify(`CI failed on ${pr} (${failed.join(', ')}) — fix the branch; auto-merge stays armed`)
-      throw new Error(`CI failed on ${pr}: ${failed.join(', ')}`)
-    }
+    if (auto && pending === 0 && failed.length > 0) return { state: 'ci_failed', failed }
+    if (auto && Date.now() - lastNews > CI_STALL_MIN * 60_000) return { state: 'stalled' }
     if (poll > 0 && poll % 5 === 0)
       log(
         `… still waiting for the merge (${Math.round((Date.now() - waitStarted) / 60000)} min, ${pending} check(s) pending)`,
@@ -925,6 +976,319 @@ async function waitForMerge(pr: string, auto: boolean) {
     if (aborting) throw new Error('aborted while waiting for merge')
     await sleep(60_000)
   }
+}
+
+// ---------------------------------------------------------------------------------------
+// CI fixer
+// ---------------------------------------------------------------------------------------
+
+interface PrRun {
+  pr: string
+  id: string
+  dir: string
+  feature: Feature
+  plugin: string
+  auto: boolean
+  /** The generator attempt that produced the PR (for the run log). */
+  attempt: number
+  started: number
+}
+
+/** Log excerpts of the failed jobs, one block per workflow run. */
+function ciEvidence(failed: CiCheck[]): string {
+  const ids = runIds(failed)
+  if (ids.length === 0) return '(no GitHub Actions run behind these checks; open the links above)'
+  return ids
+    .map((runId) => {
+      const r = sh('gh', ['run', 'view', runId, '--log-failed'], { quiet: true })
+      const text = r.code === 0 ? logExcerpt(r.out) : `gh run view failed: ${r.err || r.out}`
+      return ids.length > 1 ? `# run ${runId}\n${text}` : text
+    })
+    .join('\n\n')
+}
+
+function rerunFailed(failed: CiCheck[]): boolean {
+  let ok = true
+  for (const runId of runIds(failed)) {
+    const r = sh('gh', ['run', 'rerun', runId, '--failed'], { quiet: true })
+    if (r.code !== 0) {
+      log(`gh run rerun ${runId} --failed failed: ${r.err || r.out}`)
+      ok = false
+    }
+  }
+  return ok
+}
+
+/**
+ * Waits for the PR to merge. With auto-merge, a failed CI check no longer stops the loop: the
+ * driver passes the failed-job logs to a fixer session in the feature's worktree, re-checks
+ * and re-evaluates its commit, pushes, and waits again, up to `caps.maxCiFixAttempts` sessions.
+ * Cancelled jobs, and failures the fixer calls flaky without changing anything, are re-run once.
+ * When nothing works the driver gives up on this PR only (giveUp()); the loop continues.
+ */
+async function shepherdPr(run: PrRun): Promise<'merged' | 'blocked' | 'aborted'> {
+  const { pr, id, dir, feature, plugin, auto } = run
+  notify(`PR ready: ${pr}${auto ? ' (auto-merge armed)' : ' — merge it to let the loop continue'}`)
+  const max = config.caps.maxCiFixAttempts
+  const handled = new Set<string>()
+  const minutes = () => Math.round((Date.now() - run.started) / 60000)
+  const base = { feature: id, attempt: run.attempt, pr, minutes: 0, costUsd: 0, turns: 0 }
+  let failed: CiCheck[] = []
+  let evidence = ''
+  let context = ''
+  let ciAttempt = 0
+  let rerunDone = false
+  let pushedHead = must('git', ['rev-parse', 'HEAD'], 'git rev-parse', dir)
+
+  for (;;) {
+    if (failed.length === 0) {
+      const waited = await waitForMerge(pr, auto, handled)
+      if (waited.state === 'merged') return 'merged'
+      if (waited.state === 'stalled')
+        return giveUp(run, `CI reported nothing new for ${CI_STALL_MIN} min`, evidence)
+      failed = waited.failed
+      for (const c of failed) handled.add(c.link)
+      const names = failed.map((c) => c.name).join(', ')
+      log(`CI failed on ${pr}: ${names}`)
+      evidence = ciEvidence(failed)
+      if (!rerunDone && failed.every((c) => c.bucket === 'cancel')) {
+        rerunDone = true
+        log('only cancelled jobs: re-running them once')
+        record({
+          ...base,
+          ts: new Date().toISOString(),
+          outcome: 'ci-rerun',
+          minutes: minutes(),
+          trace: '',
+          note: `cancelled: ${names}`,
+        })
+        if (!rerunFailed(failed)) return giveUp(run, 'gh run rerun failed', evidence)
+        failed = []
+        continue
+      }
+    }
+    if (aborting) return 'aborted'
+    const names = failed.map((c) => c.name).join(', ')
+    if (ciAttempt >= max)
+      return giveUp(run, `CI still failing after ${max} fix attempt(s): ${names}`, evidence)
+    ciAttempt += 1
+
+    const prompt = render(promptFile('ci-fixer.md'), {
+      PROJECT_NAME: config.project.name,
+      PROJECT_NOTES: projectNotes(),
+      FEATURE_ID: id,
+      FEATURE_TITLE: feature.title,
+      PR: pr,
+      ATTEMPT: String(ciAttempt),
+      MAX_ATTEMPTS: String(max),
+      FAILED_CHECKS: describeChecks(failed),
+      LOG_EXCERPT: evidence,
+      BASE: `${remote()}/${defaultBranch()}`,
+      CONTEXT: context ? `\nContext from the previous fix attempt:\n${context}\n` : '',
+    })
+    const before = must('git', ['rev-parse', 'HEAD'], 'git rev-parse', dir)
+    const traceFile = path.join(ROOT, config.traceDir, `${id}-${stamp()}.ci-fix.jsonl`)
+    log(
+      `=== ${id} CI fix ${ciAttempt}/${max}: fixer session for ${names} (${config.generator.model})`,
+    )
+    const fix = await runClaude({
+      cwd: dir,
+      args: sessionArgs(prompt, plugin),
+      env: { HARNESS_LOOP: '1', HARNESS_STOP_GUARD: '1', HARNESS_FEATURE: id },
+      traceFile,
+      wallClockMs: config.caps.wallClockMin * 60_000,
+      stream: true,
+    })
+    log(`fixer finished: ${describeResult(fix)}`)
+    if (fix.pluginMissing)
+      throw new Error(
+        `the ${PLUGIN_NAME} plugin did not load from ${plugin}; run pnpm install in ${dir}`,
+      )
+    const cost = Number(fix.result?.total_cost_usd ?? 0)
+    const turns = Number(fix.result?.num_turns ?? 0)
+    const fixRecord = { ...base, costUsd: cost, turns, trace: traceFile }
+    if (aborting) {
+      record({ ...fixRecord, ts: new Date().toISOString(), outcome: 'aborted', minutes: minutes() })
+      return 'aborted'
+    }
+
+    const check = postCheck(dir, id)
+    const newCommits = Number(
+      sh('git', ['rev-list', '--count', `${before}..HEAD`], { cwd: dir, quiet: true }).out || 0,
+    )
+    const verdict = parseFixVerdict(fix.result)
+    const decision = decideCiFix({
+      status: check.status,
+      newCommits,
+      postCheckOk: check.ok,
+      verdict,
+      rerunDone,
+    })
+    log(
+      `fixer says ${verdict ? `${verdict.classification}: ${verdict.reason}` : 'nothing (no CI-FIX-VERDICT line)'}; ${newCommits} new commit(s), feature ${check.status} → ${decision}`,
+    )
+    const note = (text: string) => `ci fix ${ciAttempt}/${max}: ${text}`.slice(0, 500)
+
+    if (decision === 'give-up') {
+      const reason =
+        check.status === 'blocked'
+          ? `the fixer blocked ${id}: ${check.feature?.notes.slice(-300) ?? ''}`
+          : `the fixer judged the failure out of scope: ${verdict?.reason ?? ''}`
+      return giveUp(run, note(reason), evidence, {
+        outcome: 'blocked',
+        costUsd: cost,
+        turns,
+        trace: traceFile,
+      })
+    }
+    if (decision === 'rerun') {
+      record({
+        ...fixRecord,
+        ts: new Date().toISOString(),
+        outcome: 'ci-rerun',
+        minutes: minutes(),
+        note: note(verdict?.reason ?? 'flaky'),
+      })
+      rerunDone = true
+      log(`re-running the failed jobs once (flaky: ${verdict?.reason ?? ''})`)
+      if (!rerunFailed(failed)) return giveUp(run, 'gh run rerun failed', evidence)
+      failed = []
+      context = ''
+      continue
+    }
+    if (decision === 'retry') {
+      const problems = check.ok ? [] : check.problems
+      const why =
+        newCommits > 0
+          ? `the session ended in a bad state: ${problems.join('; ')}`
+          : `the session committed no fix (verdict: ${verdict?.classification ?? 'none'}${rerunDone && verdict?.classification === 'flaky' ? ', and the one rerun was already spent' : ''})`
+      for (const problem of problems) log(`  ✗ ${problem}`)
+      record({
+        ...fixRecord,
+        ts: new Date().toISOString(),
+        outcome: 'failed',
+        minutes: minutes(),
+        note: note(why),
+      })
+      context = `The previous fix session failed: ${why}. The session result was: ${describeResult(fix)}. Continue from the current branch state (git status, git log, PROGRESS.md).`
+      continue
+    }
+
+    // A verified fix commit: review it like the feature itself before it can merge unattended.
+    const ciContext = `\nThis branch was accepted before, then CI failed on ${pr} (${names}). The commits after ${pushedHead.slice(0, 12)} fix that failure (\`git diff ${pushedHead}..HEAD\`). Check that they fix the root cause inside the feature's scope and that no test, assertion, coverage threshold or CI setting was weakened.\n`
+    const ev = await runEvaluator(id, feature, dir, plugin, ciContext)
+    const total = cost + ev.cost
+    if (ev.verdict?.verdict === 'Accept') {
+      if (!pushBranch(id, dir)) return giveUp(run, 'git push of the CI fix failed', evidence)
+      pushedHead = must('git', ['rev-parse', 'HEAD'], 'git rev-parse', dir)
+      record({
+        ...fixRecord,
+        ts: new Date().toISOString(),
+        outcome: 'ci-fix',
+        verdict: 'Accept',
+        costUsd: total,
+        minutes: minutes(),
+        note: note(verdict?.reason ?? ''),
+      })
+      log(`CI fix pushed (${newCommits} commit(s)); auto-merge is still armed`)
+      failed = []
+      context = ''
+      continue
+    }
+    if (ev.verdict?.verdict === 'Block') {
+      const reason =
+        `evaluator Block on the CI fix: ${ev.verdict.required_follow_up.join('; ') || ev.verdict.findings.map((f) => f.note).join('; ')}`.slice(
+          0,
+          500,
+        )
+      sh('pnpm', ['--silent', 'harness:feature', 'block', id, '--reason', reason], {
+        cwd: dir,
+        quiet: true,
+      })
+      commitState(dir, `chore(harness): block ${id} after evaluator verdict on a CI fix`)
+      return giveUp(run, note(reason), evidence, {
+        outcome: 'blocked',
+        verdict: 'Block',
+        costUsd: total,
+        turns,
+        trace: traceFile,
+      })
+    }
+    record({
+      ...fixRecord,
+      ts: new Date().toISOString(),
+      outcome: 'failed',
+      verdict: ev.verdict?.verdict ?? 'none',
+      costUsd: total,
+      minutes: minutes(),
+      note: note(ev.verdict?.required_follow_up.join('; ') ?? 'no verdict'),
+    })
+    context = ev.verdict
+      ? `The evaluator asked for revisions of your fix:\n${verdictMarkdown(ev.verdict)}\nAddress every finding, re-verify, and commit again.`
+      : 'The evaluator produced no verdict on your fix; re-verify everything before committing again.'
+  }
+}
+
+/**
+ * Stops working on this PR without stopping the loop: auto-merge off (so nothing unreviewed
+ * merges later), the branch pushed for inspection, the reason on the PR, a notification. The
+ * worktree stays, like for any unmerged PR; the loop moves on to features that do not depend on it.
+ */
+function giveUp(
+  run: PrRun,
+  reason: string,
+  evidence: string,
+  session: Partial<Pick<RunRecord, 'costUsd' | 'turns' | 'trace' | 'verdict'>> & {
+    outcome?: 'failed' | 'blocked'
+  } = {},
+): 'blocked' {
+  const { pr, id, dir } = run
+  log(`giving up on ${pr}: ${reason}`)
+  const disabled = sh('gh', ['pr', 'merge', pr, '--disable-auto'], { cwd: dir, quiet: true })
+  if (disabled.code === 0) pushBranch(id, dir)
+  else log(`gh pr merge --disable-auto failed (${disabled.err}); not pushing unreviewed commits`)
+  const bodyFile = path.join(ROOT, config.traceDir, `${id}-ci-give-up.md`)
+  writeFileSync(
+    bodyFile,
+    [
+      `The loop driver stopped trying to get CI green on this PR: ${reason}`,
+      '',
+      `Auto-merge is ${disabled.code === 0 ? 'disabled' : 'still armed (disabling failed)'}. Fix the branch (worktree \`${dir}\`), push, then merge or re-enable auto-merge. Fixer traces: \`${config.traceDir}/${id}-*.ci-fix.jsonl\`.`,
+      ...(evidence
+        ? [
+            '',
+            '<details><summary>Last failed-job log excerpt</summary>',
+            '',
+            '```',
+            evidence,
+            '```',
+            '</details>',
+          ]
+        : []),
+    ].join('\n'),
+  )
+  const comment = sh('gh', ['pr', 'comment', pr, '--body-file', bodyFile], {
+    cwd: dir,
+    quiet: true,
+  })
+  if (comment.code !== 0) log(`gh pr comment failed: ${comment.err}`)
+  record({
+    ts: new Date().toISOString(),
+    feature: id,
+    attempt: run.attempt,
+    outcome: session.outcome ?? 'failed',
+    verdict: session.verdict,
+    pr,
+    costUsd: session.costUsd ?? 0,
+    turns: session.turns ?? 0,
+    minutes: Math.round((Date.now() - run.started) / 60000),
+    trace: session.trace ?? '',
+    note: reason.slice(0, 500),
+  })
+  notify(
+    `${id}: gave up on ${pr} — ${reason.slice(0, 200)}; the loop continues with independent features`,
+  )
+  return 'blocked'
 }
 
 // ---------------------------------------------------------------------------------------

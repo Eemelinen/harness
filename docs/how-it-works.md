@@ -62,6 +62,14 @@ sequenceDiagram
     else Accept
         D->>GH: git push; gh pr create (evidence, verdict, cost, trace path)
         D->>GH: wait for merge (or gh pr merge --auto --squash)
+        opt auto-merge and a CI check fails (up to caps.maxCiFixAttempts fixer sessions)
+            D->>GH: gh run view --log-failed → log excerpt
+            D->>G: fixer session in the same worktree (prompts/ci-fixer.md + failed checks + log)
+            G-->>D: fix commit, or "flaky", or feature blocked; CI-FIX-VERDICT line
+            D->>S: post-check; new commit → evaluator on the fix
+            D->>GH: Accept → git push (auto-merge still armed) · flaky → gh run rerun --failed once
+            D->>GH: give up → gh pr merge --disable-auto, PR comment, next independent feature
+        end
         D->>D: git worktree remove; git pull; next feature
     end
 ```
@@ -100,6 +108,7 @@ features with a `manual:` step (human-only) and features whose branch already ex
 | Evaluator (fresh context, read-only)                | Work that passes its own tests but misses the behaviour, scope creep, stale evidence, bad handoff                                                                                                                                                                     | plugin `agents/evaluator.md`, project rubric           |
 | Caps                                                | Runaway sessions: turns, budget, wall clock, attempts, consecutive failures                                                                                                                                                                                           | `harness.config.json`                                  |
 | CI on the PR                                        | Everything again on a clean runner                                                                                                                                                                                                                                    | project `.github/workflows/`                           |
+| CI fixer                                            | A PR that passed locally but fails CI (different env, production build, runner): fixed, reviewed and pushed, re-run once if flaky, or given up with auto-merge disabled instead of hanging the loop                                                                   | `harness loop`, `prompts/ci-fixer.md`                  |
 
 ## 4. Operating the loop
 
@@ -137,15 +146,35 @@ log (`src/events.ts` formats the stream):
 - `⛔` lines for hook blocks and denials with their reason, and `✗` for any failed tool call
 - a heartbeat every 5 minutes (elapsed time, turns, output tokens, what is still running)
 - the post-check problems, the evaluator's scores and findings, each CI check as it finishes, and the merge
+- on red CI: `=== F-NNN CI fix 1/2`, the fixer session like a generator session, then
+  `fixer says <classification> …; N new commit(s) → evaluate | rerun | retry | give-up`
 
 `.harness/traces/F-NNN-<timestamp>.generator.jsonl` is the full stream (`--include-hook-events`, so
 hook blocks are visible); the `result` line at the end carries `num_turns`, `total_cost_usd`,
-`permission_denials`. The evaluator's JSON is next to it. The PR body repeats the evidence lines,
-the verdict table and the cost.
+`permission_denials`. The evaluator's JSON is next to it, and each CI fixer session has its own
+`F-NNN-<timestamp>.ci-fix.jsonl`. The PR body repeats the evidence lines, the verdict table and the
+cost. `harness report` lists fixer sessions as `ci-fix` (pushed), `ci-rerun` or `failed`.
 
-**Intervening.** Merge or close the PR (a closed PR stops the loop for that feature). A failed CI
-check on an auto-merge PR also stops the loop: push a fix to the branch (auto-merge stays armed),
-then start the loop again once it has merged. Unblock a feature with
+**When CI fails.** With auto-merge, a red required check does not stop the loop. The driver:
+
+1. Fetches the failed jobs' logs (`gh run view --log-failed`) and passes an excerpt to a fixer
+   session in the feature's worktree.
+2. The fixer reproduces the failing step locally with the workflow's env, then classifies the
+   failure. A code defect gets a `fix(F-NNN): …` commit. Flaky or infrastructure failures get no
+   change. A failure outside the feature gets `harness feature block`.
+3. A fix commit goes through the post-check and the evaluator. On Accept the driver pushes it;
+   auto-merge is still armed. A flaky failure is re-run once (`gh run rerun --failed`), as are
+   cancelled jobs, without a session.
+4. This repeats up to `caps.maxCiFixAttempts` sessions per PR. Revise findings go to the next
+   attempt.
+
+If that does not get CI green, the driver gives up on that PR only. It disables auto-merge, so
+nothing unreviewed merges later, pushes the branch and comments the reason and log excerpt on the
+PR. It notifies you and continues with features that do not depend on it. A PR whose CI reports
+nothing for 20 minutes is given up the same way. The worktree stays. To take over, fix the branch
+there, push, and merge or re-enable auto-merge.
+
+**Intervening.** Merge or close the PR (a closed PR stops the loop for that feature). Unblock a feature with
 `pnpm harness:feature unblock F-NNN` after fixing the cause; lower or raise the caps in
 `harness.config.json`; add an allow rule when `permission_denials` shows the same legitimate command
 denied twice. After each of the first 3–5 runs, compare the evaluator's scores with your own and
