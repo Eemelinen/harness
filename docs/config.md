@@ -90,18 +90,18 @@ Default: `pnpm check` (L1), `pnpm test:unit` (L1), `pnpm test:integration` (L2),
 The guard hook's project rules. Core rules always apply: npm/yarn/npx, force push, destructive
 git, `rm -rf` outside `rmAllow`, `pnpm-lock.yaml` edits, the commit gate (`harness check`), and in
 driver-run sessions `git push`, `checkout main`, worktree commands, home-directory writes and edits
-outside the worktree.
+outside the worktree. Core rules skip heredoc bodies the same way as `pattern`.
 
 **`bash`**: rules for Bash commands, checked in order before the core rules; the first hit blocks
 the call (exit 2, Claude sees the reason).
 
-| Key              | Meaning                                                                                                                   |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `pattern`        | Regular expression tested line by line (like `grep -E`).                                                                  |
-| `atCommandStart` | `true`: match only where a command starts (the start, or after `;`, `&`, a pipe or `(`), not inside a heredoc or message. |
-| `unless`         | The rule does not fire when this also matches.                                                                            |
-| `loopOnly`       | Only in driver-run sessions (`HARNESS_LOOP=1`).                                                                           |
-| `reason`         | Shown to Claude.                                                                                                          |
+| Key              | Meaning                                                                                                                                                                                                         |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pattern`        | Regular expression tested line by line (like `grep -E`). Heredoc bodies are skipped unless the heredoc feeds a shell (`bash <<EOF`): a script for `python3 - <<EOF` or a commit message is data, not a command. |
+| `atCommandStart` | `true`: match only where a command starts (the start, or after `;`, `&`, a pipe or `(`), not inside a heredoc or message.                                                                                       |
+| `unless`         | The rule does not fire when this also matches.                                                                                                                                                                  |
+| `loopOnly`       | Only in driver-run sessions (`HARNESS_LOOP=1`).                                                                                                                                                                 |
+| `reason`         | Shown to Claude.                                                                                                                                                                                                |
 
 **`paths`**: rules for Edit, Write and MultiEdit, checked in order; the first match decides.
 

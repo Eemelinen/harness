@@ -99,6 +99,29 @@ describe('guard: Bash', () => {
     expect(bash('git push origin feat/F-001')).toBeNull()
   })
 
+  it('skips heredoc bodies that are data', () => {
+    // Personal Finances F-002: a Python edit whose string mentioned `pnpm db:up` was blocked.
+    const edit = "uv run python - <<'EOF'\ns = s.replace('pnpm db:up is unavailable', 'x')\nEOF"
+    expect(bash(edit, { loop: true })).toBeNull()
+    expect(
+      bash('git commit -F - <<EOF\nfix: stop the npm install\n\nno git push here\nEOF', {
+        loop: true,
+      }),
+    ).toBeNull()
+    expect(bash('cat > notes.md <<-"END"\n\tvitest run\n\tEND\npnpm check')).toBeNull()
+    // The command after the heredoc is still checked.
+    expect(
+      bash("uv run python - <<'EOF'\nprint(1)\nEOF\npnpm db:up", { loop: true })?.block,
+    ).toMatch(/loop driver/)
+  })
+
+  it('checks heredoc bodies fed to a shell, and << inside quotes', () => {
+    expect(bash('bash <<EOF\npnpm db:up\nEOF', { loop: true })?.block).toMatch(/loop driver/)
+    expect(bash("ssh host sh -s <<'EOF'\nrm -rf src\nEOF")?.block).toMatch(/rm -rf/)
+    expect(bash('echo "a <<EOF b"\npnpm db:up\nEOF', { loop: true })?.block).toMatch(/loop driver/)
+    expect(bash('cat <<<EOF\nnpm install x')?.block).toMatch(/use pnpm/)
+  })
+
   it('gates git commit on a valid feature list', () => {
     expect(bash('git add -A && git commit -m "feat: x"')).toBeNull()
     expect(bash('git commit -m "feat: x"', { check: 1 })).toEqual({
