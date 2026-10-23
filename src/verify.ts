@@ -252,7 +252,7 @@ export function verifyCommand(argv: string[], project: Project = loadProject()):
   if (!outcome.ok) return 1
   if (values['dry-run']) return 0
   list.last_updated = today()
-  writeFeatureList(list, { file, features: config.features })
+  writeFeatureList(list, { file, features: config.features, cwd: project.root })
   console.log(
     `${path.basename(file)} updated; /harness:clock-out still has to update PROGRESS.md and commit`,
   )

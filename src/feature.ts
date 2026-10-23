@@ -119,7 +119,7 @@ export function featureCommand(argv: string[], project: Project = loadProject())
   const list = readFeatureList(file, config.features)
   const save = () => {
     list.last_updated = today()
-    writeFeatureList(list, { file, features: config.features })
+    writeFeatureList(list, { file, features: config.features, cwd: project.root })
   }
 
   try {

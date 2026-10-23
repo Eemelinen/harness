@@ -85,12 +85,12 @@ if (config) {
   const status = config.sessionStart?.lines ?? []
   if (status.length > 0) out.push('')
   for (const line of status) {
-    if (line.file) out.push(existsSync(path.join(root, line.file)) ? line.present : line.missing)
-    else if (line.command) out.push(shellOk(line.command) ? line.ok : line.fail)
-    else if (line.env) {
-      const text = process.env[line.env] ? line.set : line.unset
-      if (text) out.push(text)
-    }
+    let text = ''
+    if (line.file) text = existsSync(path.join(root, line.file)) ? line.present : line.missing
+    else if (line.command) text = shellOk(line.command) ? line.ok : line.fail
+    else if (line.env) text = process.env[line.env] ? line.set : line.unset
+    // An empty text means "say nothing in this case".
+    if (text) out.push(text)
   }
 
   out.push(

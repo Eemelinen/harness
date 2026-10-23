@@ -249,9 +249,28 @@ export function validateFeatureList(
 ): FeatureList {
   const result = featureListSchemaFor(features).safeParse(raw)
   if (!result.success) {
-    throw new Error(`feature_list.json is invalid:\n${z.prettifyError(result.error)}`)
+    throw new Error(`feature_list.json is invalid:\n${formatIssues(result.error.issues)}`)
   }
   return result.data as FeatureList
+}
+
+/**
+ * One line per distinct message with the paths it occurs at, so an undeclared field on every
+ * feature reads as one problem rather than a hundred.
+ */
+function formatIssues(issues: z.core.$ZodIssue[]): string {
+  const byMessage = new Map<string, string[]>()
+  for (const issue of issues) {
+    const at = issue.path.map((p) => (typeof p === 'number' ? `[${p}]` : `.${String(p)}`)).join('')
+    byMessage.set(issue.message, [...(byMessage.get(issue.message) ?? []), at.replace(/^\./, '')])
+  }
+  return [...byMessage]
+    .map(([message, paths]) => {
+      const shown = paths.filter(Boolean).slice(0, 5).join(', ')
+      const more = paths.length > 5 ? ` and ${paths.length - 5} more` : ''
+      return `✖ ${message}${shown ? `\n  → at ${shown}${more}` : ''}`
+    })
+    .join('\n')
 }
 
 /** A `manual:` step cannot be verified unattended; the driver leaves such features to humans. */
@@ -345,6 +364,8 @@ export interface WriteOptions {
   features?: FeaturesConfig
   /** Run Prettier on the written file (default: true). */
   format?: boolean
+  /** Where Prettier runs, so it finds the project's install and config (default: the file's directory). */
+  cwd?: string
 }
 
 /** Validate, normalise, write and format the feature list. Throws if the list is invalid. */
@@ -357,7 +378,7 @@ export function writeFeatureList(list: FeatureList, options: WriteOptions): void
   validateFeatureList(normalized, features)
   writeFileSync(options.file, `${JSON.stringify(normalized, null, 2)}\n`)
   if (options.format ?? true) {
-    const [cmd, args] = resolveCommand('pnpm', [
+    const { cmd, args, shell } = resolveCommand('pnpm', [
       'exec',
       'prettier',
       '--write',
@@ -365,7 +386,11 @@ export function writeFeatureList(list: FeatureList, options: WriteOptions): void
       'warn',
       options.file,
     ])
-    spawnSync(cmd, args, { cwd: path.dirname(options.file), stdio: 'inherit' })
+    spawnSync(cmd, args, {
+      cwd: options.cwd ?? path.dirname(options.file),
+      shell,
+      stdio: 'inherit',
+    })
   }
 }
 

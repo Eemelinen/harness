@@ -251,3 +251,20 @@ describe('project-specific fields', () => {
     expect(readFileSync(file, 'utf8')).toBe(written)
   })
 })
+
+describe('error report', () => {
+  it('groups one problem repeated across features into one line', () => {
+    const many = Array.from({ length: 8 }, (_, i) => feature({ id: `F-00${i + 1}`, epic: 'E01' }))
+    let message = ''
+    try {
+      validateFeatureList(listWith(many))
+    } catch (error) {
+      message = (error as Error).message
+    }
+    expect(message.split('\n')).toEqual([
+      'feature_list.json is invalid:',
+      '✖ Unrecognized key: "epic"',
+      '  → at features[0], features[1], features[2], features[3], features[4] and 3 more',
+    ])
+  })
+})

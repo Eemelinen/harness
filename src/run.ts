@@ -6,15 +6,28 @@ import { fileURLToPath } from 'node:url'
 /** The installed package's root (prompts, plugin, templates live here). */
 export const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 
+export interface ResolvedCommand {
+  cmd: string
+  args: string[]
+  shell: boolean
+}
+
 /**
- * On Windows `pnpm` is a `.cmd` shim that spawnSync cannot run without a shell, and a shell
- * would mangle arguments with spaces (`--reason`); run pnpm's own entry point through node.
+ * On Windows `pnpm` is a `.cmd` shim (or a corepack shim) that spawnSync cannot run without a
+ * shell, and a shell mangles arguments with spaces (`--reason`); run pnpm's own entry point
+ * through node. Outside `pnpm run` (a hook calling the CLI directly) `npm_execpath` is unset;
+ * then the command goes through the shell with each argument quoted.
  */
-export function resolveCommand(cmd: string, args: string[]): [string, string[]] {
+export function resolveCommand(cmd: string, args: string[]): ResolvedCommand {
+  if (process.platform !== 'win32' || cmd !== 'pnpm') return { cmd, args, shell: false }
   const pnpmEntry = process.env.npm_execpath
-  if (process.platform === 'win32' && cmd === 'pnpm' && pnpmEntry)
-    return [process.execPath, [pnpmEntry, ...args]]
-  return [cmd, args]
+  if (pnpmEntry) return { cmd: process.execPath, args: [pnpmEntry, ...args], shell: false }
+  // One command string: Node deprecates passing an argument list together with `shell`.
+  return { cmd: [cmd, ...args.map(quoteForCmd)].join(' '), args: [], shell: true }
+}
+
+function quoteForCmd(arg: string): string {
+  return /^[\w./:=@-]+$/.test(arg) ? arg : `"${arg.replace(/"/g, '""')}"`
 }
 
 export interface ShResult {
@@ -28,9 +41,10 @@ export function sh(
   commandArgs: string[],
   opts: { cwd: string; quiet?: boolean; env?: Record<string, string | undefined> },
 ): ShResult {
-  const [cmd, args] = resolveCommand(command, commandArgs)
+  const { cmd, args, shell } = resolveCommand(command, commandArgs)
   const res: SpawnSyncReturns<string> = spawnSync(cmd, args, {
     cwd: opts.cwd,
+    shell,
     encoding: 'utf8',
     stdio: opts.quiet ? ['ignore', 'pipe', 'pipe'] : ['inherit', 'pipe', 'inherit'],
     env: { ...process.env, ...opts.env },
