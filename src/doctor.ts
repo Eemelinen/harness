@@ -63,6 +63,21 @@ const legacyCopies = [
  * on Linux and macOS when the script is committed as 100644 — the default from a Windows checkout,
  * where git does not record the executable bit. Undefined outside git or for an untracked script.
  */
+/**
+ * The harness repository runs its own loop (docs/self-improvement.md). It has no plugin pin: the
+ * driver gives sessions the plugin of its own checkout, never the one a session is editing.
+ */
+export function isHarnessRepository(project: Project): boolean {
+  try {
+    const pkg = JSON.parse(readFileSync(project.resolve('package.json'), 'utf8')) as {
+      name?: string
+    }
+    return pkg.name === '@eemelinen/harness'
+  } catch {
+    return false
+  }
+}
+
 export function initModeProblem(project: Project): string | undefined {
   const init = path.relative(project.root, project.resolve(project.config.project.init))
   const res = sh('git', ['ls-files', '--stage', '--', init], { cwd: project.root, quiet: true })
@@ -90,36 +105,43 @@ export function doctor(
     add('error', error instanceof Error ? error.message : String(error))
   }
 
-  const settingsFile = project.resolve('.claude', 'settings.json')
-  let settings: ClaudeSettings = {}
-  try {
-    settings = JSON.parse(readFileSync(settingsFile, 'utf8')) as ClaudeSettings
-  } catch {
-    add('error', '.claude/settings.json is missing or not valid JSON')
-  }
-  if (settings.enabledPlugins?.[PLUGIN_KEY] === true) add('ok', `plugin ${PLUGIN_KEY} enabled`)
-  else add('error', `.claude/settings.json → enabledPlugins["${PLUGIN_KEY}"] must be true`)
-  const source = settings.extraKnownMarketplaces?.[MARKETPLACE]?.source
-  const expectedRef = `v${version}`
-  if (!source) {
-    add('error', `.claude/settings.json → extraKnownMarketplaces["${MARKETPLACE}"] is missing`)
-  } else if (source.source === 'github' && source.repo === REPO) {
-    if (source.ref === expectedRef) add('ok', `plugin marketplace pinned to ${expectedRef}`)
-    else
+  if (isHarnessRepository(project)) {
+    add(
+      'ok',
+      'harness repository: loop sessions load the plugin of the checkout the driver runs from',
+    )
+  } else {
+    const settingsFile = project.resolve('.claude', 'settings.json')
+    let settings: ClaudeSettings = {}
+    try {
+      settings = JSON.parse(readFileSync(settingsFile, 'utf8')) as ClaudeSettings
+    } catch {
+      add('error', '.claude/settings.json is missing or not valid JSON')
+    }
+    if (settings.enabledPlugins?.[PLUGIN_KEY] === true) add('ok', `plugin ${PLUGIN_KEY} enabled`)
+    else add('error', `.claude/settings.json → enabledPlugins["${PLUGIN_KEY}"] must be true`)
+    const source = settings.extraKnownMarketplaces?.[MARKETPLACE]?.source
+    const expectedRef = `v${version}`
+    if (!source) {
+      add('error', `.claude/settings.json → extraKnownMarketplaces["${MARKETPLACE}"] is missing`)
+    } else if (source.source === 'github' && source.repo === REPO) {
+      if (source.ref === expectedRef) add('ok', `plugin marketplace pinned to ${expectedRef}`)
+      else
+        add(
+          'error',
+          `plugin marketplace ref is ${source.ref ?? '(none)'} but the installed package is ${version}; set ref to "${expectedRef}" (or install the matching package)`,
+        )
+    } else {
+      add('warn', `plugin marketplace source is ${JSON.stringify(source)} (local development?)`)
+    }
+
+    const hooks = JSON.stringify(settings.hooks ?? {})
+    if (/\.claude\/hooks\/(guard|stop-guard|session-start|format)\.sh/.test(hooks))
       add(
         'error',
-        `plugin marketplace ref is ${source.ref ?? '(none)'} but the installed package is ${version}; set ref to "${expectedRef}" (or install the matching package)`,
+        '.claude/settings.json still registers the old harness hooks; the plugin provides them',
       )
-  } else {
-    add('warn', `plugin marketplace source is ${JSON.stringify(source)} (local development?)`)
   }
-
-  const hooks = JSON.stringify(settings.hooks ?? {})
-  if (/\.claude\/hooks\/(guard|stop-guard|session-start|format)\.sh/.test(hooks))
-    add(
-      'error',
-      '.claude/settings.json still registers the old harness hooks; the plugin provides them',
-    )
 
   const required = [
     'AGENTS.md',

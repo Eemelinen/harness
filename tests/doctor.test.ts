@@ -113,6 +113,17 @@ describe('doctor', () => {
     expect(doctor(p, '1.2.3').ok).toBe(true)
   })
 
+  it('needs no plugin pin in the harness repository itself', () => {
+    const p = project({})
+    expect(doctor(p, '1.2.3').ok).toBe(false)
+    writeFileSync(path.join(p.root, 'package.json'), JSON.stringify({ name: '@eemelinen/harness' }))
+    const result = doctor(p, '1.2.3')
+    expect(result.ok).toBe(true)
+    expect(result.lines.map((l) => l.text)).toContain(
+      'harness repository: loop sessions load the plugin of the checkout the driver runs from',
+    )
+  })
+
   it('warns about leftover copies of the in-repo harness', () => {
     const result = doctor(project(pinned('v1.2.3'), ['scripts/harness-loop.ts']), '1.2.3')
     expect(result.ok).toBe(true)

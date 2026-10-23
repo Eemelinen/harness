@@ -467,6 +467,11 @@ export function parseIssueFeature(body: string): IssueFeature | undefined {
   }
 }
 
+/** The issue text above the feature block (problem, evidence, proposed fix), trimmed for notes. */
+export function issueContext(body: string): string {
+  return (body.split('```json harness-feature')[0] ?? '').trim().slice(0, 3000)
+}
+
 /** The next free `F-NNN` above every id in use (the feature list, open branches). */
 export function nextFeatureId(ids: Iterable<string>): string {
   let max = 0
@@ -674,7 +679,8 @@ export function nextIntake(
       verification: spec.verification,
       evidence: [],
       attempts: 0,
-      notes: `From retro issue ${repo}#${issue.number}: ${issue.url}`,
+      // Sessions cannot read GitHub, so the issue's problem and evidence travel in the notes.
+      notes: `From retro issue ${repo}#${issue.number}: ${issue.url}\n\n${issueContext(issue.body)}`,
     }
     return { issue: issue.number, url: issue.url, repo, feature, safety: spec.safety }
   }

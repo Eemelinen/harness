@@ -251,13 +251,19 @@ function describeResult(r: ClaudeResult): string {
   )} · cost $${Number(res.total_cost_usd ?? 0).toFixed(2)} · denials ${denials}`
 }
 
-/** The plugin of the harness version installed in `dir` (a worktree may pin a newer one). */
-export function pluginDir(dir: string): string {
+/**
+ * The plugin of the harness version installed in `dir` (a worktree may pin a newer one). In the
+ * harness repository the package resolves to the worktree itself; its sessions must not run the
+ * hooks they are editing, so they get the plugin of the checkout the driver runs from.
+ */
+export function pluginDir(dir: string, driverRoot: string = PACKAGE_ROOT): string {
   try {
     const require = createRequire(path.join(dir, 'package.json'))
-    return path.join(path.dirname(require.resolve('@eemelinen/harness/package.json')), 'plugin')
+    const root = path.dirname(require.resolve('@eemelinen/harness/package.json'))
+    if (path.resolve(root) === path.resolve(dir)) return path.join(driverRoot, 'plugin')
+    return path.join(root, 'plugin')
   } catch {
-    return path.join(PACKAGE_ROOT, 'plugin')
+    return path.join(driverRoot, 'plugin')
   }
 }
 

@@ -29,13 +29,21 @@
   },
   "packageManager": "pnpm@10.15.0",
   "scripts": {
-    "check": "pnpm typecheck && pnpm format:check && pnpm test",
+    "check": "pnpm typecheck && pnpm format:check && pnpm harness:check && pnpm test",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "schema": "tsx scripts/build-schema.ts"
+    "schema": "tsx scripts/build-schema.ts",
+    "harness:check": "node bin/harness.mjs check",
+    "harness:feature": "node bin/harness.mjs feature",
+    "harness:verify": "node bin/harness.mjs verify",
+    "harness:clean-state": "node bin/harness.mjs clean-state",
+    "harness:loop": "node bin/harness.mjs loop",
+    "harness:report": "node bin/harness.mjs report",
+    "harness:retro": "node bin/harness.mjs retro",
+    "harness:doctor": "node bin/harness.mjs doctor"
   },
   "dependencies": {
     "tsx": "^4.23.13",

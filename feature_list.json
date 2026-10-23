@@ -1,0 +1,33 @@
+{
+  "project": "harness",
+  "last_updated": "2026-10-23",
+  "rules": {
+    "single_active_feature": true,
+    "passing_requires_evidence": true,
+    "do_not_skip_verification": true
+  },
+  "status_legend": {
+    "not_started": "Work has not begun.",
+    "in_progress": "The feature is the current active task (at most one at a time).",
+    "blocked": "Work cannot continue until the blocker in `notes` is resolved.",
+    "passing": "Required verification ran and the evidence is recorded."
+  },
+  "features": [
+    {
+      "id": "F-000",
+      "priority": 0,
+      "area": "harness",
+      "title": "Self-hosting bootstrap",
+      "user_visible_behavior": "The harness repository is a harness project: ./init.sh, pnpm harness:doctor and pnpm check pass, and pnpm harness:loop can build features from harness-retro issues.",
+      "status": "passing",
+      "depends_on": [],
+      "verification": ["L1: pnpm check", "L1: pnpm harness:doctor"],
+      "evidence": [
+        "2026-10-23 pnpm check → pass (working tree on 82216a3)",
+        "2026-10-23 pnpm harness:doctor → pass (working tree on 82216a3)"
+      ],
+      "attempts": 0,
+      "notes": "Retro features are added by the loop's intake (docs/self-improvement.md)."
+    }
+  ]
+}

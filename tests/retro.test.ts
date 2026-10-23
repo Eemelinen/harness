@@ -9,6 +9,7 @@ import {
   fingerprintOf,
   hookBlockReason,
   issueBody,
+  issueContext,
   nextFeatureId,
   normalizeSummary,
   parseIssueFeature,
@@ -196,6 +197,14 @@ describe('retro issues and intake', () => {
       verification: ['L1: pnpm check'],
       safety: true,
     })
+  })
+
+  it('carries the problem and evidence, not the block, into the feature notes', () => {
+    const body = issueBody(finding, { project: 'PF', version: '0.2.0', date: '2026-10-23' })
+    const context = issueContext(body)
+    expect(context).toMatch(/^The guard matched a string in a Python heredoc\./)
+    expect(context).toContain('F-002: python3 - <<EOF … blocked')
+    expect(context).not.toContain('harness-feature')
   })
 
   it('falls back to L1 and rejects a block without a title', () => {
