@@ -7,6 +7,7 @@
  *   harness clean-state …       clock-out gate (src/clean-state.ts)
  *   harness loop …              unattended driver (src/loop.ts)
  *   harness report              past driver runs
+ *   harness retro …             the loop's look back at its own runs (src/retro.ts)
  *   harness doctor              is the project wired correctly (src/doctor.ts)
  *   harness config              print the resolved configuration
  */
@@ -16,9 +17,10 @@ import { doctorCommand, initModeProblem } from './doctor'
 import { featureCommand } from './feature'
 import { readFeatureList, summarizeFeatureList } from './feature-list'
 import { loopCommand } from './loop'
+import { retroCommand } from './retro'
 import { verifyCommand } from './verify'
 
-const usage = `usage: harness <check|feature|verify|clean-state|loop|report|doctor|config> [args]
+const usage = `usage: harness <check|feature|verify|clean-state|loop|report|retro|doctor|config> [args]
 docs: https://github.com/Eemelinen/harness#readme`
 
 function check(argv: string[]): number {
@@ -51,6 +53,8 @@ export async function main(argv: string[]): Promise<number> {
       return loopCommand(rest)
     case 'report':
       return loopCommand(['--report'])
+    case 'retro':
+      return retroCommand(rest)
     case 'doctor':
       return doctorCommand(rest)
     case 'config':

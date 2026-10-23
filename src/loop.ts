@@ -52,8 +52,18 @@ import {
   nextReadyFeature,
   readFeatureList,
   today,
+  writeFeatureList,
   type Feature,
 } from './feature-list'
+import {
+  countFeatureRun,
+  markQueued,
+  nextIntake,
+  readRetroState,
+  reviewReasons,
+  runRetro,
+  type IntakeItem,
+} from './retro'
 import { PACKAGE_ROOT, sh as run, shellLine } from './run'
 
 export const PLUGIN_NAME = 'harness'
@@ -507,7 +517,8 @@ interface RunRecord {
   ts: string
   feature: string
   attempt: number
-  outcome: 'pr' | 'merged' | 'blocked' | 'failed' | 'aborted' | 'pushed' | 'ci-fix' | 'ci-rerun'
+  outcome:
+    'pr' | 'merged' | 'blocked' | 'failed' | 'aborted' | 'pushed' | 'ci-fix' | 'ci-rerun' | 'retro'
   verdict?: string
   pr?: string
   costUsd: number
@@ -600,7 +611,11 @@ function generatorTemplate(): string {
 
 type IterationOutcome = 'done' | 'blocked' | 'failed' | 'aborted'
 
-async function runFeature(feature: Feature, opts: Options): Promise<IterationOutcome> {
+async function runFeature(
+  feature: Feature,
+  opts: Options,
+  intake?: IntakeItem,
+): Promise<IterationOutcome> {
   const id = feature.id
   const started = Date.now()
   if (!opts.dryRun) {
@@ -609,6 +624,7 @@ async function runFeature(feature: Feature, opts: Options): Promise<IterationOut
     log(`${id} — ${feature.title}; readable log: ${path.relative(ROOT, logFile)}`)
   }
   const dir = ensureWorktree(id, opts.dryRun)
+  if (intake) addIntakeFeature(dir, intake, opts.dryRun)
   const plugin = pluginDir(opts.dryRun ? ROOT : dir)
   const template = generatorTemplate()
   const maxAttempts = feature.max_attempts ?? config.caps.maxAttempts
@@ -777,7 +793,7 @@ async function runFeature(feature: Feature, opts: Options): Promise<IterationOut
     }
 
     // Accept → publish.
-    const pr = publish(
+    const { url: pr, review } = publish(
       id,
       dir,
       feature,
@@ -789,6 +805,7 @@ async function runFeature(feature: Feature, opts: Options): Promise<IterationOut
         trace: traceFile,
       },
       opts,
+      intake,
     )
     record({
       ts: new Date().toISOString(),
@@ -801,7 +818,13 @@ async function runFeature(feature: Feature, opts: Options): Promise<IterationOut
       turns,
       minutes: minutes(),
       trace: traceFile,
+      note: review.length > 0 ? `waits for a human: ${review.join('; ')}` : undefined,
     })
+    if (pr && review.length > 0) {
+      // Not merged, so dependents stay unready; independent features go on.
+      notify(`${id} PR needs a human review before it merges (${review.join('; ')}): ${pr}`)
+      return 'done'
+    }
     if (pr && (config.merge !== 'none' || opts.autoMerge) && opts.wait) {
       const end = await shepherdPr({
         pr,
@@ -842,6 +865,28 @@ async function runFeature(feature: Feature, opts: Options): Promise<IterationOut
   return 'blocked'
 }
 
+/**
+ * A retro issue's feature is written on its own branch, not on the default branch (protected, and
+ * the driver never pushes it); the PR that implements it also adds it.
+ */
+function addIntakeFeature(dir: string, intake: IntakeItem, dryRun: boolean) {
+  const id = intake.feature.id
+  if (dryRun) {
+    log(`would add ${id} to ${config.project.featureList} on ${branchFor(id)} from ${intake.url}`)
+    return
+  }
+  const worktree = loadProject(dir)
+  const file = worktree.resolve(worktree.config.project.featureList)
+  const list = readFeatureList(file, worktree.config.features)
+  if (list.features.some((f) => f.id === id)) return // reused worktree
+  writeFeatureList(
+    { ...list, last_updated: today(), features: [...list.features, intake.feature] },
+    { file, features: worktree.config.features, cwd: dir },
+  )
+  commitState(dir, `chore(harness): add ${id} from retro issue #${intake.issue}`)
+  log(`${id} added to ${config.project.featureList} from ${intake.url}`)
+}
+
 function recordAttempt(dir: string, id: string, reason: string) {
   sh('pnpm', ['--silent', 'harness:feature', 'attempt', id, '--reason', reason], {
     cwd: dir,
@@ -875,13 +920,27 @@ function publish(
   verdict: Verdict,
   stats: { cost: number; turns: number; trace: string },
   opts: Options,
-): string | undefined {
+  intake?: IntakeItem,
+): { url?: string; review: string[] } {
   pushBranch(id, dir)
+  const changed = sh('git', ['diff', '--name-only', `${defaultBranch()}...HEAD`], {
+    cwd: dir,
+    quiet: true,
+  }).out
+  const review = reviewReasons(
+    changed.split('\n').filter(Boolean),
+    config.reviewPaths,
+    intake?.safety,
+  )
   if (!ghAvailable()) {
     log(`gh is not available; branch ${branchFor(id)} pushed — open the PR by hand`)
-    return undefined
+    return { review }
   }
   const body = [
+    ...(intake ? [`Closes #${intake.issue} (harness retro).`, ''] : []),
+    ...(review.length > 0
+      ? ['> **Waits for a human review** — not auto-merged:', ...review.map((r) => `> - ${r}`), '']
+      : []),
     `## ${id} — ${feature.title}`,
     '',
     feature.user_visible_behavior,
@@ -915,18 +974,20 @@ function publish(
   )
   if (r.code !== 0) {
     log(`gh pr create failed: ${r.err}`)
-    return undefined
+    return { review }
   }
   const url = r.out.split('\n').find((l) => l.startsWith('https://')) ?? r.out
   log(`PR opened: ${url}`)
-  if (opts.autoMerge || config.merge === 'auto') {
+  if (review.length > 0) {
+    log(`not arming auto-merge, the PR waits for a human: ${review.join('; ')}`)
+  } else if (opts.autoMerge || config.merge === 'auto') {
     const m = sh('gh', ['pr', 'merge', url, '--auto', '--squash', '--delete-branch'], {
       cwd: dir,
       quiet: true,
     })
     if (m.code !== 0) log(`gh pr merge --auto failed: ${m.err}`)
   }
-  return url
+  return { url, review }
 }
 
 type WaitResult =
@@ -1394,12 +1455,51 @@ export async function loopCommand(argv: string[]): Promise<number> {
 
   preflight(opts)
   let consecutiveFailures = 0
+  let retros = 0
   const attempted = new Set<string>()
+  const intakeIssues = new Set<number>()
+
+  /** A retro when one is due; failures are logged, never fatal to the loop. */
+  const retroIfDue = (trigger: 'every' | 'queue-empty'): boolean => {
+    if (opts.dryRun || retros >= config.retro.maxPerLoop) return false
+    const since = readRetroState(project).featuresSince
+    const due =
+      trigger === 'every'
+        ? config.retro.every > 0 && since >= config.retro.every
+        : config.retro.onQueueEmpty && since > 0
+    if (!due) return false
+    retros += 1
+    log(`=== retro (${trigger}, ${since} feature run(s) since the last one)`)
+    try {
+      runRetro(project, { log })
+    } catch (error) {
+      log(`retro failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    return true
+  }
+
   for (;;) {
     const list = readFeatureList(project.resolve(config.project.featureList), config.features)
     const inFlight = inFlightIds()
     let feature: Feature | undefined
-    if (opts.feature) {
+    let intake: IntakeItem | undefined
+    if (!opts.feature && config.retro.intake) {
+      try {
+        const ids = [...list.features.map((f) => f.id), ...inFlight]
+        const priority = Math.max(0, ...list.features.map((f) => f.priority))
+        intake = nextIntake(project, ids, priority)
+        // Dry run: nothing is queued, so the same issue would come back every iteration.
+        if (intake && intakeIssues.has(intake.issue)) intake = undefined
+      } catch (error) {
+        log(`retro intake skipped: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    if (intake) {
+      feature = intake.feature
+      intakeIssues.add(intake.issue)
+      log(`retro intake: ${intake.url} → ${feature.id} — ${feature.title}`)
+      if (!opts.dryRun) markQueued(project, intake, branchFor(feature.id))
+    } else if (opts.feature) {
       feature = list.features.find((f) => f.id === opts.feature)
       if (!feature) throw new Error(`unknown feature ${opts.feature}`)
       if (!isReady(feature, list)) {
@@ -1416,6 +1516,8 @@ export async function loopCommand(argv: string[]): Promise<number> {
       feature = nextReadyFeature(list, { exclude: [...inFlight, ...attempted] })
     }
     if (!feature) {
+      // A retro may file issues the intake picks up; look again before stopping.
+      if (retroIfDue('queue-empty') && config.retro.intake) continue
       const waiting = inFlight.length
         ? ` (${inFlight.join(', ')} in flight — merge their PRs to unblock dependents)`
         : ''
@@ -1423,8 +1525,10 @@ export async function loopCommand(argv: string[]): Promise<number> {
       break
     }
     attempted.add(feature.id)
-    const outcome = await runFeature(feature, opts)
+    const outcome = await runFeature(feature, opts, intake)
     if (outcome === 'aborted') break
+    if (!opts.dryRun) countFeatureRun(project)
+    retroIfDue('every')
     consecutiveFailures = outcome === 'done' ? 0 : consecutiveFailures + 1
     if (consecutiveFailures >= config.caps.maxConsecutiveFailures) {
       notify(`${consecutiveFailures} consecutive failures — stopping the loop`)
