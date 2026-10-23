@@ -3,7 +3,7 @@
 Releases are git tags (`vX.Y.Z`). Projects pin the package and the plugin marketplace to the same
 tag; see [docs/developing.md](docs/developing.md).
 
-## Unreleased
+## v0.2.0 — 2026-10-23
 
 - **The loop fixes red CI on its own PRs.** Before, a failed required check on an auto-merge PR
   stopped the loop until a human fixed the branch.
