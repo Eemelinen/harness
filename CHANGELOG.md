@@ -16,6 +16,10 @@ tag; see [docs/developing.md](docs/developing.md).
   - Fixer sessions show in `harness report` as `ci-fix` / `ci-rerun`.
 - **The loop no longer waits forever on silent CI.** With auto-merge, a PR whose CI reports nothing
   for 20 minutes is given up the same way.
+- **`harness check` and `harness doctor` fail when `init.sh` is not committed executable.** A
+  Windows checkout commits it as `100644`, and `./init.sh` (skills, templates, the startup path)
+  then fails on Linux and macOS with "Permission denied". The error names the fix
+  (`git update-index --chmod=+x init.sh`).
 
 ## v0.1.0 — 2026-10-23
 

@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -5,7 +6,7 @@ import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 import { loadProject } from '../src/config'
-import { doctor, MARKETPLACE, PLUGIN_KEY, REPO } from '../src/doctor'
+import { doctor, initModeProblem, MARKETPLACE, PLUGIN_KEY, REPO } from '../src/doctor'
 
 function project(settings: unknown, extraFiles: string[] = []) {
   const dir = mkdtempSync(path.join(tmpdir(), 'harness-doctor-'))
@@ -55,6 +56,14 @@ const pinned = (ref: string) => ({
   enabledPlugins: { [PLUGIN_KEY]: true },
 })
 
+/** Stage init.sh with an explicit mode; update-index sets it the same way on every platform. */
+function trackInit(root: string, chmod: '+x' | '-x') {
+  const git = (...args: string[]) => execFileSync('git', args, { cwd: root, stdio: 'ignore' })
+  git('init', '--quiet')
+  git('add', 'init.sh')
+  git('update-index', `--chmod=${chmod}`, 'init.sh')
+}
+
 describe('doctor', () => {
   it('passes when the plugin is enabled and pinned to the package version', () => {
     const result = doctor(project(pinned('v1.2.3')), '1.2.3')
@@ -84,6 +93,24 @@ describe('doctor', () => {
     expect(errors).toHaveLength(2)
     expect(errors[0]).toMatch(/enabledPlugins/)
     expect(errors[1]).toMatch(/old harness hooks/)
+  })
+
+  it('fails when init.sh is committed without the executable bit', () => {
+    const p = project(pinned('v1.2.3'))
+    trackInit(p.root, '-x')
+    const result = doctor(p, '1.2.3')
+    expect(result.ok).toBe(false)
+    expect(result.lines.find((l) => l.status === 'error')?.text).toMatch(
+      /init\.sh is committed as 100644.*git update-index --chmod=\+x init\.sh/,
+    )
+  })
+
+  it('accepts an executable init.sh and skips the mode check outside git', () => {
+    const p = project(pinned('v1.2.3'))
+    expect(initModeProblem(p)).toBeUndefined()
+    trackInit(p.root, '+x')
+    expect(initModeProblem(p)).toBeUndefined()
+    expect(doctor(p, '1.2.3').ok).toBe(true)
   })
 
   it('warns about leftover copies of the in-repo harness', () => {

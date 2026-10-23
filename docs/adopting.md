@@ -80,7 +80,9 @@ Both end in the same layout. `X.Y.Z` below is the release you install; both pins
    - CLAUDE.md: `@AGENTS.md` plus the Claude Code specifics (plugin skills `/harness:clock-in`,
      `/harness:verify-feature`, `/harness:clock-out`, agent `harness:evaluator`, hooks from the plugin)
 
-6. **Gitignore** `.harness/`. Keep `*.sh` at LF in `.gitattributes`.
+6. **Gitignore** `.harness/`. Keep `*.sh` at LF in `.gitattributes`. Commit `init.sh` executable:
+   Windows does not record the bit, so run `git update-index --chmod=+x init.sh` there
+   (`harness check` and `harness doctor` fail until it is set).
 
 7. **Trust the folder.** Run `claude` in the repository once and accept the trust dialog and the
    marketplace install. Until then Claude Code ignores the project settings.

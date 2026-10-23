@@ -12,7 +12,7 @@
  */
 import { cleanStateCommand } from './clean-state'
 import { loadProject } from './config'
-import { doctorCommand } from './doctor'
+import { doctorCommand, initModeProblem } from './doctor'
 import { featureCommand } from './feature'
 import { readFeatureList, summarizeFeatureList } from './feature-list'
 import { loopCommand } from './loop'
@@ -26,6 +26,13 @@ function check(argv: string[]): number {
   const file = project.resolve(argv[0] ?? project.config.project.featureList)
   const list = readFeatureList(file, project.config.features)
   console.log(`${project.config.project.featureList} OK — ${summarizeFeatureList(list)}`)
+  // Also here, not only in doctor: init.sh runs doctor, so it cannot report its own mode, while
+  // check runs in every project's `pnpm check` and CI.
+  const initProblem = initModeProblem(project)
+  if (initProblem) {
+    console.error(`harness check: ${initProblem}`)
+    return 1
+  }
   return 0
 }
 
