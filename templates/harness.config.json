@@ -1,0 +1,59 @@
+{
+  "$schema": "./node_modules/@eemelinen/harness/schema/harness.config.schema.json",
+  "project": {
+    "name": "<Project>",
+    "sourceDirs": ["src"]
+  },
+  "features": {
+    "ticketPattern": "^ABC-\\d{3}$",
+    "ticketExample": "ABC-042"
+  },
+  "services": null,
+  "guard": {
+    "bash": [
+      {
+        "pattern": "(^|[;&|\\s])(npx |pnpm (exec|dlx) |\\./node_modules/\\.bin/)?(vitest|playwright)(\\s|$)",
+        "unless": "playwright install|pnpm test",
+        "reason": "run tests through pnpm test:* (they select the right config)"
+      }
+    ],
+    "paths": [
+      {
+        "match": ".env",
+        "decision": "deny",
+        "reason": "secrets; document variables in .env.example instead"
+      }
+    ]
+  },
+  "cleanState": {
+    "checks": [
+      {
+        "name": "no .only/.skip added under tests/",
+        "kind": "added",
+        "paths": ["tests"],
+        "pattern": "\\.(only|skip)\\(|\\b(it|test|describe)\\.(only|skip)\\b",
+        "message": "a .only/.skip was added under tests/ (AGENTS.md: never skip tests to get green)"
+      }
+    ]
+  },
+  "sessionStart": {
+    "lines": [{ "file": ".env", "present": "env: .env present", "missing": "env: .env MISSING" }],
+    "hint": "Clock-in: AGENTS.md → Clock-in (or /harness:clock-in). Layers: pnpm check (L1)."
+  },
+  "generator": { "model": "claude-opus-5-5", "effort": "high" },
+  "evaluator": { "model": "claude-opus-5-5", "effort": "high" },
+  "allowedTools": [
+    "Bash(pnpm check*)",
+    "Bash(pnpm test:unit*)",
+    "Bash(pnpm harness:*)",
+    "Bash(pnpm exec prettier*)",
+    "Bash(FAST=1 ./init.sh)",
+    "Bash(git status*)",
+    "Bash(git log*)",
+    "Bash(git diff*)",
+    "Bash(git show*)",
+    "Bash(git add *)",
+    "Bash(git commit *)"
+  ],
+  "merge": "wait"
+}

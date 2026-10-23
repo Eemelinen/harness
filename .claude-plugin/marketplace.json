@@ -1,0 +1,12 @@
+{
+  "name": "eemelinen-harness",
+  "owner": { "name": "Eemeli Surakka" },
+  "description": "The agent harness plugin. Pin this marketplace to the same tag as the @eemelinen/harness package.",
+  "plugins": [
+    {
+      "name": "harness",
+      "source": "./plugin",
+      "description": "Clock-in/verify/clock-out skills, evaluator agent and guard hooks for harness projects."
+    }
+  ]
+}

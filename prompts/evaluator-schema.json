@@ -1,0 +1,40 @@
+{
+  "type": "object",
+  "properties": {
+    "verdict": { "type": "string", "enum": ["Accept", "Revise", "Block"] },
+    "scores": {
+      "type": "object",
+      "properties": {
+        "correctness": { "type": "integer", "minimum": 0, "maximum": 2 },
+        "verification": { "type": "integer", "minimum": 0, "maximum": 2 },
+        "scope": { "type": "integer", "minimum": 0, "maximum": 2 },
+        "reliability": { "type": "integer", "minimum": 0, "maximum": 2 },
+        "maintainability": { "type": "integer", "minimum": 0, "maximum": 2 },
+        "handoff": { "type": "integer", "minimum": 0, "maximum": 2 }
+      },
+      "required": [
+        "correctness",
+        "verification",
+        "scope",
+        "reliability",
+        "maintainability",
+        "handoff"
+      ]
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "severity": { "type": "string", "enum": ["critical", "major", "minor"] },
+          "file": { "type": "string" },
+          "line": { "type": "integer" },
+          "note": { "type": "string" }
+        },
+        "required": ["severity", "note"]
+      }
+    },
+    "required_follow_up": { "type": "array", "items": { "type": "string" } }
+  },
+  "required": ["verdict", "scores", "findings", "required_follow_up"]
+}

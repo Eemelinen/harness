@@ -1,0 +1,55 @@
+{
+  "name": "@eemelinen/harness",
+  "version": "0.1.0",
+  "description": "Agent harness for long-running coding agents: feature-list state machine, layered verification, clean-state gate, unattended loop driver and the Claude Code plugin (skills, hooks, evaluator) that goes with it.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Eemelinen/harness.git"
+  },
+  "type": "module",
+  "bin": {
+    "harness": "bin/harness.mjs"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./feature-list": "./src/feature-list.ts",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "bin",
+    "src",
+    "prompts",
+    "plugin",
+    "schema",
+    "templates",
+    ".claude-plugin"
+  ],
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "packageManager": "pnpm@10.15.0",
+  "scripts": {
+    "check": "pnpm typecheck && pnpm format:check && pnpm test",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "schema": "tsx scripts/build-schema.ts"
+  },
+  "dependencies": {
+    "tsx": "^4.23.13",
+    "zod": "^4.5.4"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "prettier": "3.9.6",
+    "typescript": "5.9.3",
+    "vitest": "5.0.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  }
+}

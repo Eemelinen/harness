@@ -1,0 +1,649 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "$comment": {
+      "type": "string"
+    },
+    "project": {
+      "default": {},
+      "type": "object",
+      "properties": {
+        "name": {
+          "default": "this project",
+          "type": "string",
+          "minLength": 1
+        },
+        "defaultBranch": {
+          "default": "main",
+          "type": "string",
+          "minLength": 1
+        },
+        "remote": {
+          "default": "origin",
+          "type": "string",
+          "minLength": 1
+        },
+        "branchPrefix": {
+          "default": "feat/",
+          "type": "string",
+          "minLength": 1
+        },
+        "sourceDirs": {
+          "default": [
+            "src"
+          ],
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "stateFiles": {
+          "default": [
+            "feature_list.json",
+            "PROGRESS.md",
+            "docs/harness/"
+          ],
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "featureList": {
+          "default": "feature_list.json",
+          "type": "string",
+          "minLength": 1
+        },
+        "progress": {
+          "default": "PROGRESS.md",
+          "type": "string",
+          "minLength": 1
+        },
+        "init": {
+          "default": "./init.sh",
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "features": {
+      "default": {},
+      "type": "object",
+      "properties": {
+        "ticketPattern": {
+          "default": "^[A-Z][A-Z0-9]*-\\d+$",
+          "type": "string",
+          "minLength": 1
+        },
+        "ticketExample": {
+          "default": "ABC-042",
+          "type": "string",
+          "minLength": 1
+        },
+        "extraFields": {
+          "default": {},
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1
+          },
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "default": "string",
+                "type": "string",
+                "enum": [
+                  "string",
+                  "string[]"
+                ]
+              },
+              "pattern": {
+                "type": "string",
+                "minLength": 1
+              },
+              "example": {
+                "type": "string"
+              },
+              "after": {
+                "default": "spec",
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      }
+    },
+    "verify": {
+      "default": {},
+      "type": "object",
+      "properties": {
+        "dockerLayers": {
+          "default": [
+            "L2",
+            "L3"
+          ],
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "L1",
+              "L2",
+              "L3"
+            ]
+          }
+        },
+        "ciNotes": {
+          "default": {},
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "enum": [
+              "L1",
+              "L2",
+              "L3"
+            ]
+          },
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "shell": {
+          "default": "sh",
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "milestones": {
+      "default": [
+        {
+          "pattern": "pnpm check(?:\\s|$)",
+          "label": "L1 pnpm check"
+        },
+        {
+          "pattern": "pnpm test:unit\\b",
+          "label": "L1 test:unit"
+        },
+        {
+          "pattern": "pnpm test:integration\\b",
+          "label": "L2 test:integration"
+        },
+        {
+          "pattern": "pnpm test:e2e\\b",
+          "label": "L3 test:e2e"
+        }
+      ],
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "pattern": {
+            "type": "string",
+            "minLength": 1
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "pattern",
+          "label"
+        ]
+      }
+    },
+    "services": {
+      "default": {},
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "check": {
+              "default": "docker info",
+              "type": "string",
+              "minLength": 1
+            },
+            "up": {
+              "type": "string",
+              "minLength": 1
+            },
+            "name": {
+              "default": "Docker",
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "guard": {
+      "default": {},
+      "type": "object",
+      "properties": {
+        "bash": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "pattern": {
+                "type": "string",
+                "minLength": 1
+              },
+              "unless": {
+                "type": "string",
+                "minLength": 1
+              },
+              "atCommandStart": {
+                "default": false,
+                "type": "boolean"
+              },
+              "loopOnly": {
+                "default": false,
+                "type": "boolean"
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "pattern",
+              "reason"
+            ]
+          }
+        },
+        "paths": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "match": {
+                "type": "string",
+                "minLength": 1
+              },
+              "decision": {
+                "type": "string",
+                "enum": [
+                  "deny",
+                  "ask",
+                  "skip"
+                ]
+              },
+              "reason": {
+                "default": "",
+                "type": "string"
+              },
+              "tools": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "Edit",
+                    "Write",
+                    "MultiEdit"
+                  ]
+                }
+              },
+              "contentPattern": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "match",
+              "decision"
+            ]
+          }
+        },
+        "rmAllow": {
+          "default": [
+            "/tmp/",
+            "node_modules",
+            "coverage"
+          ],
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "cleanState": {
+      "default": {},
+      "type": "object",
+      "properties": {
+        "checks": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "added",
+                  "removed"
+                ]
+              },
+              "paths": {
+                "minItems": 1,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "pattern": {
+                "type": "string",
+                "minLength": 1
+              },
+              "message": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "name",
+              "kind",
+              "paths",
+              "pattern",
+              "message"
+            ]
+          }
+        },
+        "files": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "file": {
+                "type": "string",
+                "minLength": 1
+              },
+              "mustContain": {
+                "minItems": 1,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "message": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "file",
+              "mustContain",
+              "name",
+              "message"
+            ]
+          }
+        }
+      }
+    },
+    "sessionStart": {
+      "default": {},
+      "type": "object",
+      "properties": {
+        "lines": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "present": {
+                    "type": "string"
+                  },
+                  "missing": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "file",
+                  "present",
+                  "missing"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "command": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "ok": {
+                    "type": "string"
+                  },
+                  "fail": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "command",
+                  "ok",
+                  "fail"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "env": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "set": {
+                    "type": "string"
+                  },
+                  "unset": {
+                    "default": "",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "env",
+                  "set"
+                ]
+              }
+            ]
+          }
+        },
+        "hint": {
+          "type": "string"
+        }
+      }
+    },
+    "format": {
+      "default": "pnpm exec prettier --write --log-level warn --ignore-unknown",
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "prompts": {
+      "default": {},
+      "type": "object",
+      "properties": {
+        "generatorNotes": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "caps": {
+      "default": {},
+      "type": "object",
+      "properties": {
+        "maxAttempts": {
+          "default": 2,
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "maxTurns": {
+          "default": 200,
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "maxBudgetUsd": {
+          "default": 15,
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "wallClockMin": {
+          "default": 60,
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "maxConsecutiveFailures": {
+          "default": 2,
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "generator": {
+      "type": "object",
+      "properties": {
+        "model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "permissionMode": {
+          "default": "auto",
+          "type": "string",
+          "enum": [
+            "auto",
+            "acceptEdits",
+            "dontAsk",
+            "bypassPermissions"
+          ]
+        },
+        "effort": {
+          "type": "string",
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ]
+        }
+      },
+      "required": [
+        "model"
+      ]
+    },
+    "evaluator": {
+      "type": "object",
+      "properties": {
+        "model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "effort": {
+          "type": "string",
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ]
+        },
+        "maxTurns": {
+          "default": 60,
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "maxBudgetUsd": {
+          "default": 4,
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "wallClockMin": {
+          "default": 15,
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      },
+      "required": [
+        "model"
+      ]
+    },
+    "allowedTools": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "worktreeRoot": {
+      "type": "string",
+      "minLength": 1
+    },
+    "merge": {
+      "default": "wait",
+      "type": "string",
+      "enum": [
+        "wait",
+        "auto",
+        "none"
+      ]
+    },
+    "traceDir": {
+      "default": ".harness/traces",
+      "type": "string",
+      "minLength": 1
+    },
+    "runsLog": {
+      "default": ".harness/runs.jsonl",
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "required": [
+    "generator",
+    "evaluator"
+  ],
+  "title": "harness.config.json"
+}

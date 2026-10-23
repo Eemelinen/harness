@@ -1,0 +1,32 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pnpm check*)",
+      "Bash(pnpm test:unit*)",
+      "Bash(pnpm harness:*)",
+      "Bash(pnpm exec prettier*)",
+      "Bash(git status*)",
+      "Bash(git log*)",
+      "Bash(git diff*)",
+      "Bash(git show*)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Edit(./.env)",
+      "Write(./.env)",
+      "Edit(pnpm-lock.yaml)",
+      "Write(pnpm-lock.yaml)",
+      "Bash(git push --force*)",
+      "Bash(git push -f*)",
+      "Bash(git reset --hard*)"
+    ]
+  },
+  "extraKnownMarketplaces": {
+    "eemelinen-harness": {
+      "source": { "source": "github", "repo": "Eemelinen/harness", "ref": "vX.Y.Z" }
+    }
+  },
+  "enabledPlugins": {
+    "harness@eemelinen-harness": true
+  }
+}

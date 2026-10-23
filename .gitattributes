@@ -1,0 +1,3 @@
+# Hooks and the CLI entry run under node/bash on every platform; keep LF so a Windows checkout
+# does not break them.
+* text=auto eol=lf

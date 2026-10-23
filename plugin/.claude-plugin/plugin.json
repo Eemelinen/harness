@@ -1,0 +1,8 @@
+{
+  "name": "harness",
+  "displayName": "Agent harness",
+  "description": "Session loop for long-running coding agents: clock-in/verify/clock-out skills, the fresh-context evaluator, and guard, session-start, format and Stop hooks driven by the project's harness.config.json. Pair with the @eemelinen/harness package at the same version.",
+  "author": { "name": "Eemeli Surakka" },
+  "homepage": "https://github.com/Eemelinen/harness",
+  "repository": "https://github.com/Eemelinen/harness"
+}
