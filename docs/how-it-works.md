@@ -132,13 +132,44 @@ rely on `allowedTools` alone.
 | `pnpm harness:loop --dry-run --no-docker` | Prints the worktree commands and the exact `claude` invocations for the next ready feature; runs nothing.                                                                 |
 | `pnpm harness:loop --once`                | One feature end to end, then stops. Use this for the first runs.                                                                                                          |
 | `pnpm harness:loop --feature F-020`       | This feature only (it must be ready and unattended-capable).                                                                                                              |
-| `pnpm harness:loop`                       | Loop until nothing is ready, a stop condition hits, or Ctrl-C (finishes the current session first).                                                                       |
+| `pnpm harness:loop`                       | Loop until nothing is ready, a stop condition hits, or a stop signal (Ctrl-C, SIGTERM, SIGHUP; see below).                                                                |
 | `--auto-merge`                            | `gh pr merge --auto --squash --delete-branch` for this run.                                                                                                               |
 | `--no-wait`                               | Do not wait for the merge; continue with features that do not depend on the open PR.                                                                                      |
 | `pnpm harness:report`                     | Table of past runs (feature, attempt, outcome, verdict, turns, cost, PR).                                                                                                 |
 | `pnpm harness:selftest`                   | Runs the installed harness against this project: prompts render, the guard still blocks its core cases and allows the project's commands, the hooks exit cleanly, doctor. |
 | `pnpm harness:update [--check]`           | Move this checkout to the newest harness release (`--to X.Y.Z` for another one; `--check` only reports).                                                                  |
 | `pnpm harness:feature list`               | Queue overview with `[ready]` / `[ready, human-only]` markers.                                                                                                            |
+
+**Stopping the loop.** SIGINT (Ctrl-C), SIGTERM and SIGHUP all stop the driver the same way. A
+closing terminal, IDE task or chat session sends SIGHUP or SIGTERM to the processes it started.
+
+- The driver logs `<signal>: stopping` and sends the running session SIGINT, then SIGTERM if it
+  hasn't ended after 30 s. No further session, push, PR or restart starts.
+- It records the attempt as `aborted` in `runs.jsonl` with `stopped by <signal>` in its `note`,
+  notifies, and exits with 128 + the signal number (130, 143, 129). The row is written wherever
+  the stop lands: after the session, the evaluator or the safety review, and also when the stop
+  ends the attempt with an error. An attempt that already has its own row (after its `pr` row, in
+  the merge wait) gets no second one; a stop between two features records nothing.
+- A second signal exits at once and ends the session; the attempt still gets its `aborted` row,
+  with no cost (the session's result never arrives). A repeat within 2 s counts as the same
+  signal, because a terminal signals the whole process group and pnpm passes it on again.
+- A driver waiting for its restarted self (after an update) passes the signal on to it, and the
+  restarted driver stops the same way. A stop during the update itself starts no restarted driver:
+  the pins stay moved, so the next loop run starts on the new version (without its probation).
+
+The interrupted feature's branch and worktree stay, uncommitted changes included. A restarted
+loop skips a feature whose branch exists, so continue it with `pnpm harness:loop --feature F-NNN`;
+that reuses the worktree. A feature from a retro issue exists only on its branch, so finish that one
+by hand in the worktree.
+
+To run a loop that outlives its terminal, detach it from the terminal's session:
+
+```sh
+setsid nohup pnpm harness:loop > loop.log 2>&1 &   # or: tmux new -d -s loop 'pnpm harness:loop'
+pkill -TERM -f 'harness.mjs loop'                  # stop it later
+```
+
+SIGTERM to the driver is enough: it passes the stop on to its session and to a restarted driver.
 
 **Staying on the newest harness (rollout safety).** With `update.auto`, the loop moves to new
 harness releases on its own before it starts a feature. One project, the canary, tests each
