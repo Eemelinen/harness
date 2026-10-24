@@ -186,9 +186,9 @@ Run these in order. All must pass.
    feature. It opens a `harness/update-vX.Y.Z` PR that changes only the package pin and the plugin
    marketplace ref, auto-merges it under `merge: "auto"` (or `--auto-merge`) and restarts itself on
    the new version ([how-it-works.md](how-it-works.md#4-operating-the-loop)).
-   - **Canary:** pick one project as the canary and give it `"minAgeHours": 0`. It takes each
-     release first. The others wait `update.minAgeHours` (default 6) before they follow, and skip
-     any release the canary or anyone else quarantined.
+   - **Canary:** the first project loop that starts a feature after a release claims it and tests
+     it. The others wait until it's verified, and skip any release that was quarantined. A project
+     that should never be first sets `"canary": false`.
    - **Trust:** such a PR skips this project's merge gate. Before the PR opens, the new version's
      `harness selftest` must not regress against the installed one. Changes to the guard, hooks,
      prompts and loop wait for a human in the harness repository.

@@ -7,9 +7,10 @@
  *   harness update --check       print the installed and the target release, change nothing
  *
  * With `update.auto` the loop driver does the same before each feature, in its own worktree and
- * PR (src/loop.ts → maybeUpdate), and picks the release with pickTarget: old enough
- * (`update.minAgeHours`), not breaking unless allowed, and not quarantined. A release is
- * quarantined by a `harness-quarantine` issue in the harness repository (src/quarantine.ts).
+ * PR (src/loop.ts → maybeUpdate), and picks the release with pickTarget: verified by a canary
+ * project or claimed by this one as canary (src/rollout.ts), not breaking unless allowed, and not
+ * quarantined. A release is quarantined by a `harness-quarantine` issue in the harness repository
+ * (src/quarantine.ts).
  * Without `gh` the command falls back to the newest tag (`git ls-remote`) and cannot see quarantines.
  */
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
@@ -20,6 +21,7 @@ import { parseArgs } from 'node:util'
 import { loadProject, type HarnessConfig } from './config'
 import { MARKETPLACE, packageVersion, REPO } from './doctor'
 import { harnessRepo, listIssues, type Issue } from './retro'
+import { listRollouts, rolloutStates } from './rollout'
 import { PACKAGE_ROOT, sh } from './run'
 
 export const PACKAGE = '@eemelinen/harness'
@@ -143,47 +145,68 @@ export function listQuarantined(repo: string, cwd: string): Set<string> {
   return quarantinedVersions(listIssues(repo, QUARANTINE_LABEL, 'all', cwd))
 }
 
+/** What the rollout says about a release (src/rollout.ts → rolloutStates). */
+export interface RolloutView {
+  /** The project that verified it as canary. */
+  verified?: string
+  /** The claim that holds the release now. */
+  claim?: { project: string; until: string; commentId: string }
+}
+
 export type Target =
   | { action: 'update'; version: string; why: string }
+  | { action: 'canary'; version: string; why: string; resume?: string }
   | { action: 'none'; reason?: string }
   | { action: 'notify'; version: string; reason: string }
 
 const newestOf = (releases: Release[]) =>
   [...releases].sort((a, b) => compareVersions(b.version, a.version))[0]
 
+const hhmm = (iso: string) => `${iso.slice(11, 16)} UTC`
+
 /**
- * The release to move to. Normally the newest published release newer than `installed` that is
- * not quarantined, not breaking (unless `allowBreaking`) and at least `minAgeHours` old. When
- * `installed` itself is quarantined, the age does not count: move forward to the newest eligible
- * release (the fix) or, when there is none, back to the newest older release that is not
- * quarantined.
+ * The release to move to (docs/how-it-works.md → Rollout safety). Candidates are published releases
+ * newer than `installed` that are not quarantined and not breaking (unless `allowBreaking`).
+ *
+ * - The newest candidate verified by a canary is taken.
+ * - When the newest candidate is not verified: a project whose claim holds it continues as its
+ *   canary (`resume`); while another project holds it, an older verified candidate is taken or
+ *   nothing; when nobody holds it, a project with `canary` claims it, and one without takes only an
+ *   older verified candidate.
+ * - When `installed` is quarantined: forward to the newest verified candidate, else back to the
+ *   newest older release that is not quarantined (moving back needs no verification).
  */
 export function pickTarget(s: {
   installed: string
   releases: Release[]
   quarantined: Set<string>
-  now: number
-  minAgeHours: number
+  rollouts: Map<string, RolloutView>
+  me: string
+  canary: boolean
   allowBreaking: boolean
 }): Target {
   const clean = s.releases.filter((r) => !r.draft && !r.prerelease && !s.quarantined.has(r.version))
   const allowed = (r: Release) => s.allowBreaking || !isBreaking(s.installed, r.version)
+  const verifiedBy = (r: Release) => s.rollouts.get(r.version)?.verified
   const newer = clean.filter((r) => compareVersions(r.version, s.installed) > 0)
+  const verified = newestOf(newer.filter(allowed).filter(verifiedBy))
+  const take = (r: Release, why: string): Target => ({ action: 'update', version: r.version, why })
   if (s.quarantined.has(s.installed)) {
     const why = `v${s.installed} is quarantined`
-    const forward = newestOf(newer.filter(allowed))
-    if (forward) return { action: 'update', version: forward.version, why }
+    if (verified)
+      return take(verified, `${why}; v${verified.version} verified by ${verifiedBy(verified)}`)
     const back = newestOf(clean.filter((r) => compareVersions(r.version, s.installed) < 0))
-    if (back) return { action: 'update', version: back.version, why }
+    if (back) return take(back, why)
     return {
       action: 'notify',
       version: s.installed,
-      reason: `harness ${why} and no other release is available; fix it by hand`,
+      reason: `harness ${why} and no verified or older release is available; fix it by hand`,
     }
   }
   if (newer.length === 0) return { action: 'none' }
   const compatible = newer.filter(allowed)
-  if (compatible.length === 0) {
+  const newest = newestOf(compatible)
+  if (!newest) {
     const breaking = newestOf(newer)!
     return {
       action: 'notify',
@@ -191,14 +214,35 @@ export function pickTarget(s: {
       reason: `harness v${breaking.version} is a breaking release (installed v${s.installed}); update by hand (pnpm harness:update --to ${breaking.version}) or set update.allowBreaking`,
     }
   }
-  const ageHours = (r: Release) => (s.now - Date.parse(r.publishedAt)) / 3_600_000
-  const ready = newestOf(compatible.filter((r) => ageHours(r) >= s.minAgeHours))
-  if (ready) return { action: 'update', version: ready.version, why: 'newer release' }
-  const waiting = newestOf(compatible)!
-  return {
-    action: 'none',
-    reason: `v${waiting.version} is ${ageHours(waiting).toFixed(1)} h old; waiting until it is ${s.minAgeHours} h old (update.minAgeHours)`,
-  }
+  if (verifiedBy(newest)) return take(newest, `verified by ${verifiedBy(newest)}`)
+  const claim = s.rollouts.get(newest.version)?.claim
+  if (claim?.project === s.me)
+    return {
+      action: 'canary',
+      version: newest.version,
+      why: `this project's canary claim on v${newest.version} holds until ${hhmm(claim.until)}`,
+      resume: claim.commentId,
+    }
+  const fallback = verified && take(verified, `verified by ${verifiedBy(verified)}`)
+  if (claim)
+    return (
+      fallback || {
+        action: 'none',
+        reason: `v${newest.version} is being tested by ${claim.project} until ${hhmm(claim.until)}`,
+      }
+    )
+  if (s.canary)
+    return {
+      action: 'canary',
+      version: newest.version,
+      why: `nobody has tested v${newest.version} yet`,
+    }
+  return (
+    fallback || {
+      action: 'none',
+      reason: `v${newest.version} waits for a canary project to verify it (update.canary is off here)`,
+    }
+  )
 }
 
 /** Is `dir` the harness repository itself? It runs from its own checkout and has nothing to pin. */
@@ -309,23 +353,29 @@ export function updateCommand(argv: string[]): number {
   if (!target) {
     const repo = rolloutRepo(project.config)
     if (sh('gh', ['auth', 'status'], { cwd: project.root, quiet: true }).code === 0) {
-      // By hand there is no waiting time; quarantines and breaking releases still count.
-      const plan = pickTarget({
-        installed,
-        releases: listReleases(repo, project.root),
-        quarantined: listQuarantined(repo, project.root),
-        now: Date.now(),
-        minAgeHours: 0,
-        allowBreaking: project.config.update.allowBreaking,
-      })
-      if (plan.action !== 'update') {
-        console.log(
-          `installed v${installed}: ${plan.action === 'none' ? (plan.reason ?? 'up to date') : plan.reason}`,
-        )
+      // By hand a human decides: the newest release that is not quarantined, with its rollout state.
+      const quarantined = listQuarantined(repo, project.root)
+      const newest = newestOf(
+        listReleases(repo, project.root).filter(
+          (r) =>
+            !r.draft &&
+            !r.prerelease &&
+            !quarantined.has(r.version) &&
+            compareVersions(r.version, installed) > 0,
+        ),
+      )
+      if (!newest) {
+        console.log(`installed v${installed}: up to date`)
         return 0
       }
-      target = plan.version
-      console.log(`installed v${installed} · target v${target} (${plan.why})`)
+      target = newest.version
+      const state = rolloutStates(listRollouts(repo, project.root), Date.now()).get(target)
+      const rollout = state?.verified
+        ? `verified by ${state.verified}`
+        : state?.claim
+          ? `being tested by ${state.claim.project} until ${hhmm(state.claim.until)}`
+          : 'not tested by a canary yet'
+      console.log(`installed v${installed} · target v${target} (${rollout})`)
     } else {
       target = latestRelease(repositoryUrl(), project.root)
       console.log(

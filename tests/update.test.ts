@@ -16,6 +16,7 @@ import {
   pinSpec,
   quarantinedVersions,
   repositoryUrl,
+  type RolloutView,
   withMarketplaceRef,
 } from '../src/update'
 
@@ -176,88 +177,124 @@ describe('quarantinedVersions', () => {
 })
 
 describe('pickTarget', () => {
-  const now = Date.parse('2026-10-25T12:00:00Z')
-  const release = (version: string, hoursAgo: number, extra: object = {}) => ({
+  const release = (version: string, extra: object = {}) => ({
     version,
-    publishedAt: new Date(now - hoursAgo * 3_600_000).toISOString(),
+    publishedAt: '2026-10-25T10:00:00Z',
     draft: false,
     prerelease: false,
     ...extra,
   })
+  const until = '2026-10-25T14:00:00.000Z'
+  const verified = (project = 'o/metsavahti') => ({ verified: project })
+  const claimed = (project: string) => ({ claim: { project, until, commentId: '99' } })
   const base = {
     installed: '0.3.1',
     quarantined: new Set<string>(),
-    now,
-    minAgeHours: 6,
+    rollouts: new Map(),
+    me: 'o/idea-generator',
+    canary: true,
     allowBreaking: false,
   }
 
-  it('takes the newest release that is old enough', () => {
-    const releases = [release('0.3.1', 50), release('0.3.2', 30), release('0.3.3', 7)]
-    expect(pickTarget({ ...base, releases })).toEqual({
+  it('takes the newest release a canary verified', () => {
+    const releases = [release('0.3.2'), release('0.3.3')]
+    const rollouts = new Map([
+      ['0.3.2', verified()],
+      ['0.3.3', verified()],
+    ])
+    expect(pickTarget({ ...base, releases, rollouts })).toEqual({
       action: 'update',
       version: '0.3.3',
-      why: 'newer release',
+      why: 'verified by o/metsavahti',
     })
   })
 
-  it('waits for a release that is too new, and takes it at once with minAgeHours 0', () => {
-    const releases = [release('0.3.2', 2)]
-    expect(pickTarget({ ...base, releases })).toEqual({
+  it('claims an untested release nobody holds, as canary', () => {
+    expect(pickTarget({ ...base, releases: [release('0.3.2')] })).toEqual({
+      action: 'canary',
+      version: '0.3.2',
+      why: 'nobody has tested v0.3.2 yet',
+    })
+  })
+
+  it('waits while another project tests it, or takes an older verified release meanwhile', () => {
+    const rollouts = new Map<string, RolloutView>([['0.3.3', claimed('o/metsavahti')]])
+    expect(pickTarget({ ...base, releases: [release('0.3.3')], rollouts })).toEqual({
       action: 'none',
-      reason: 'v0.3.2 is 2.0 h old; waiting until it is 6 h old (update.minAgeHours)',
+      reason: 'v0.3.3 is being tested by o/metsavahti until 14:00 UTC',
     })
-    expect(pickTarget({ ...base, releases, minAgeHours: 0 })).toMatchObject({ version: '0.3.2' })
+    rollouts.set('0.3.2', verified('o/personal-finances'))
+    expect(
+      pickTarget({ ...base, releases: [release('0.3.2'), release('0.3.3')], rollouts }),
+    ).toEqual({ action: 'update', version: '0.3.2', why: 'verified by o/personal-finances' })
   })
 
-  it('takes an older ready release while the newest one is still too new', () => {
-    const releases = [release('0.3.2', 10), release('0.3.3', 1)]
-    expect(pickTarget({ ...base, releases })).toMatchObject({ action: 'update', version: '0.3.2' })
+  it('continues its own claim after a restart', () => {
+    const rollouts = new Map([['0.3.2', claimed('o/idea-generator')]])
+    expect(pickTarget({ ...base, releases: [release('0.3.2')], rollouts })).toMatchObject({
+      action: 'canary',
+      version: '0.3.2',
+      resume: '99',
+    })
+  })
+
+  it('takes only verified releases with update.canary off', () => {
+    const releases = [release('0.3.2'), release('0.3.3')]
+    expect(pickTarget({ ...base, canary: false, releases })).toEqual({
+      action: 'none',
+      reason: 'v0.3.3 waits for a canary project to verify it (update.canary is off here)',
+    })
+    const rollouts = new Map([['0.3.2', verified()]])
+    expect(pickTarget({ ...base, canary: false, releases, rollouts })).toMatchObject({
+      action: 'update',
+      version: '0.3.2',
+    })
   })
 
   it('skips quarantined releases, drafts and prereleases', () => {
     const releases = [
-      release('0.3.2', 20),
-      release('0.3.3', 20),
-      release('0.3.4', 20, { draft: true }),
-      release('0.3.5', 20, { prerelease: true }),
+      release('0.3.2'),
+      release('0.3.3'),
+      release('0.3.4', { draft: true }),
+      release('0.3.5', { prerelease: true }),
     ]
     expect(pickTarget({ ...base, releases, quarantined: new Set(['0.3.3']) })).toMatchObject({
+      action: 'canary',
       version: '0.3.2',
     })
   })
 
   it('does nothing when up to date', () => {
-    expect(pickTarget({ ...base, releases: [release('0.3.1', 50)] })).toEqual({ action: 'none' })
+    expect(pickTarget({ ...base, releases: [release('0.3.1')] })).toEqual({ action: 'none' })
   })
 
   it('reports a breaking release instead of taking it, unless allowed', () => {
-    const releases = [release('0.4.0', 20)]
+    const releases = [release('0.4.0')]
     expect(pickTarget({ ...base, releases })).toMatchObject({
       action: 'notify',
       version: '0.4.0',
       reason: expect.stringContaining('update.allowBreaking'),
     })
     expect(pickTarget({ ...base, releases, allowBreaking: true })).toMatchObject({
-      action: 'update',
+      action: 'canary',
       version: '0.4.0',
     })
-    expect(
-      pickTarget({ ...base, releases: [release('0.3.2', 20), release('0.4.0', 20)] }),
-    ).toMatchObject({ action: 'update', version: '0.3.2' })
   })
 
-  it('moves off a quarantined installed release: forward to the fix, at any age', () => {
-    const releases = [release('0.3.0', 90), release('0.3.1', 50), release('0.3.2', 1)]
-    expect(pickTarget({ ...base, releases, quarantined: new Set(['0.3.1']) })).toEqual({
+  it('moves off a quarantined installed release to a verified fix', () => {
+    const releases = [release('0.3.0'), release('0.3.1'), release('0.3.2')]
+    const quarantined = new Set(['0.3.1'])
+    expect(
+      pickTarget({ ...base, releases, quarantined, rollouts: new Map([['0.3.2', verified()]]) }),
+    ).toEqual({
       action: 'update',
       version: '0.3.2',
-      why: 'v0.3.1 is quarantined',
+      why: 'v0.3.1 is quarantined; v0.3.2 verified by o/metsavahti',
     })
   })
 
-  it('moves back when there is no fix yet', () => {
-    const releases = [release('0.2.9', 200), release('0.3.0', 90), release('0.3.1', 50)]
+  it('moves back when no fix is verified yet', () => {
+    const releases = [release('0.2.9'), release('0.3.0'), release('0.3.1'), release('0.3.2')]
     expect(pickTarget({ ...base, releases, quarantined: new Set(['0.3.1']) })).toEqual({
       action: 'update',
       version: '0.3.0',
@@ -270,7 +307,7 @@ describe('pickTarget', () => {
 
   it('asks for a human when a quarantined installed release has nowhere to go', () => {
     expect(
-      pickTarget({ ...base, releases: [release('0.3.1', 50)], quarantined: new Set(['0.3.1']) }),
+      pickTarget({ ...base, releases: [release('0.3.1')], quarantined: new Set(['0.3.1']) }),
     ).toMatchObject({ action: 'notify', version: '0.3.1' })
   })
 })

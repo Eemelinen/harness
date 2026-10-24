@@ -100,8 +100,8 @@ loops. These layers keep it contained:
   `harness selftest`.
 - **When it ships:** breaking changes, including config schema breaks, are released as breaking,
   and projects don't take those on their own.
-- **Staged rollout:** a waiting time (`update.minAgeHours`) after one canary project takes the
-  release first.
+- **Canary rollout:** the first project loop to reach a release claims it and tests it. The
+  others take it only after that test passes.
 - **Per project:** the update PR's selftest against the installed version, its doctor and L1
   baseline, and the project's CI.
 - **Probation:** the first feature on a new release. If it fails, the project rolls back and re-runs

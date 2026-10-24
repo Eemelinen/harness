@@ -158,7 +158,11 @@ describe('probation', () => {
       retros: 0,
       consecutiveFailures: 0,
       updates: ['0.3.5'],
-      probation: { version: '0.3.5', from: '0.3.4' },
+      probation: {
+        version: '0.3.5',
+        from: '0.3.4',
+        canary: { repo: 'o/harness', issue: 4, commentId: '99', version: '0.3.5', me: 'o/p' },
+      },
       retry: { feature: 'F-012', suspect: '0.3.5', from: '0.3.4', evidence: ['F-012: failed'] },
     }
     expect(readCarry(JSON.stringify(carry))).toEqual(carry)

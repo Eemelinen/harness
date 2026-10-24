@@ -18,7 +18,8 @@
  * an unattended session without the guard must not run.
  *
  * With `update.auto`, before each feature the driver moves to the harness release pickTarget chooses
- * (src/update.ts: old enough, not breaking, not quarantined) through its own pin-only PR, after the
+ * (src/update.ts: verified by a canary, or claimed by this project as canary on its rollout issue,
+ * src/rollout.ts; not breaking, not quarantined) through its own pin-only PR, after the
  * new version's selftest showed no regression; then it restarts itself on that version. See
  * maybeUpdate and pinPr. The first feature on the new version runs on probation: if it does not
  * pass, the run is set aside, the pins roll back and the feature runs again on the old version,
@@ -67,6 +68,7 @@ import {
   countFeatureRun,
   markQueued,
   nextIntake,
+  projectRepo,
   readRetroState,
   reviewReasons,
   runRetro,
@@ -75,6 +77,18 @@ import {
 import { hardStops, parseSafetyVerdict, type SafetyVerdict, type Snapshot } from './review'
 import { PACKAGE_ROOT, sh as run, shellLine } from './run'
 import { quarantine } from './quarantine'
+import {
+  claim,
+  ensureRolloutIssue,
+  listRollouts,
+  markQuarantined,
+  markVerified,
+  releaseClaim,
+  renewClaim,
+  rolloutStates,
+  type CanaryClaim,
+  type RolloutState,
+} from './rollout'
 import { regressions, type Check } from './selftest'
 import {
   applyUpdate,
@@ -1611,9 +1625,16 @@ export interface Carry {
   /** Releases this run already updated to, tried to, or reported; each is handled once. */
   updates: string[]
   /** Set when an update merged: the first feature on `version` decides whether it stays. */
-  probation?: { version: string; from: string }
+  probation?: Probation
   /** Set after a probation rollback: `feature` runs again on `from` to test `suspect`. */
   retry?: Retry
+}
+
+export interface Probation {
+  version: string
+  from: string
+  /** Set when this project tests the release as its canary (src/rollout.ts). */
+  canary?: CanaryClaim
 }
 
 export interface Retry {
@@ -1621,6 +1642,7 @@ export interface Retry {
   suspect: string
   from: string
   evidence: string[]
+  canary?: CanaryClaim
   /** The retro issue the feature came from; its feature exists only on the set-aside branch. */
   intake?: IntakeItem
 }
@@ -1929,14 +1951,18 @@ async function maybeUpdate(opts: Options, carry: Carry): Promise<boolean> {
   }
   const installed = packageVersion()
   const repo = rolloutRepo(config)
+  const me = projectRepo(project) ?? config.project.name
   let target: Target
+  let rollouts: Map<string, RolloutState>
   try {
+    rollouts = rolloutStates(listRollouts(repo, ROOT), Date.now())
     target = pickTarget({
       installed,
       releases: listReleases(repo, ROOT),
       quarantined: listQuarantined(repo, ROOT),
-      now: Date.now(),
-      minAgeHours: config.update.minAgeHours,
+      rollouts,
+      me,
+      canary: config.update.canary,
       allowBreaking: config.update.allowBreaking,
     })
   } catch (error) {
@@ -1955,7 +1981,48 @@ async function maybeUpdate(opts: Options, carry: Carry): Promise<boolean> {
     return false
   }
   const forward = compareVersions(version, installed) > 0
-  const probation = forward ? { version, from: installed } : undefined
+  let canary: CanaryClaim | undefined
+  if (target.action === 'canary') {
+    if (opts.dryRun) {
+      log(
+        `would claim harness v${version} as canary (${target.why}) on its rollout issue, then update to it`,
+      )
+      carry.updates.push(version)
+      return false
+    }
+    try {
+      const issue = ensureRolloutIssue(repo, version, ROOT, rollouts.get(version)?.issue)
+      if (target.resume) {
+        canary = { repo, issue, commentId: target.resume, version, me }
+        log(`continuing as canary of harness v${version} (${target.why})`)
+      } else {
+        const claimed = await claim({ repo, issue, version, me }, config.update.canaryHours, ROOT)
+        if (!claimed.won) {
+          log(`harness v${version} was claimed first by ${claimed.holder ?? 'another project'}`)
+          return false
+        }
+        canary = claimed.claim
+        notify(
+          `${config.project.name} tests harness v${version} as canary (claim for ${config.update.canaryHours} h): https://github.com/${repo}/issues/${issue}`,
+        )
+      }
+    } catch (error) {
+      log(`harness canary claim skipped: ${error instanceof Error ? error.message : String(error)}`)
+      return false
+    }
+  }
+  /** The update did not reach the default branch: let the next loop test the release. */
+  const giveBack = (reason: string) => {
+    if (!canary) return
+    try {
+      releaseClaim(canary, reason, ROOT)
+    } catch (error) {
+      log(
+        `releasing the canary claim failed: ${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
+  }
+  const probation = forward ? { version, from: installed, canary } : undefined
   if (!opts.dryRun && defaultBranchPins(version)) {
     carry.updates.push(version)
     log(`${defaultBranch()} already pins harness v${version}; pulling it`)
@@ -1967,12 +2034,14 @@ async function maybeUpdate(opts: Options, carry: Carry): Promise<boolean> {
       notify(
         `harness update to v${version} failed, the loop stays on v${installed}: ${error instanceof Error ? error.message : String(error)}`,
       )
+      giveBack('the pull after the update failed')
       return false
     }
   }
   const branch = pinBranch(version, forward)
   if (sh('git', ['ls-remote', '--heads', remote(), `refs/heads/${branch}`], { quiet: true }).out) {
     log(`harness update: ${branch} is still open`)
+    giveBack(`its update PR ${branch} is still open`)
     return false
   }
   carry.updates.push(version)
@@ -1991,7 +2060,16 @@ async function maybeUpdate(opts: Options, carry: Carry): Promise<boolean> {
     return false
   }
   const result = await pinPr(version, installed, opts, target.why)
-  if (result.state !== 'merged') return false
+  if (result.state === 'quarantined' && canary && result.pr) {
+    settleCanary(canary, (c) => markQuarantined(c, result.pr!, ROOT))
+    return false
+  }
+  if (result.state !== 'merged') {
+    giveBack(
+      result.state === 'waiting' ? 'its update PR waits for a human merge' : 'the update failed',
+    )
+    return false
+  }
   try {
     takeUpdate(installed, version, result.pr)
     carry.probation = probation
@@ -2000,8 +2078,35 @@ async function maybeUpdate(opts: Options, carry: Carry): Promise<boolean> {
     notify(
       `harness pins moved to v${version} but the pull or install failed: ${error instanceof Error ? error.message : String(error)}`,
     )
+    giveBack('the pull after the update failed')
     return false
   }
+}
+
+/** Runs one rollout step on the canary's claim; a GitHub failure is logged, never thrown. */
+function settleCanary(c: CanaryClaim | undefined, step: (c: CanaryClaim) => void) {
+  if (!c) return
+  try {
+    step(c)
+  } catch (error) {
+    log(`rollout issue update failed: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+let renewTimer: NodeJS.Timeout | undefined
+
+/**
+ * Keeps the canary's claim alive while its probation or re-test runs: renewed now and every 30
+ * minutes, so only a canary that stopped lets its claim lapse. `undefined` stops renewing.
+ */
+function keepClaim(c: CanaryClaim | undefined) {
+  if (renewTimer) clearInterval(renewTimer)
+  renewTimer = undefined
+  if (!c) return
+  const renew = () => settleCanary(c, (claim) => renewClaim(claim, config.update.canaryHours, ROOT))
+  renew()
+  renewTimer = setInterval(renew, 30 * 60_000)
+  renewTimer.unref()
 }
 
 /** Runs the loop again on the harness now installed in ROOT and waits for it. */
@@ -2055,8 +2160,8 @@ function runEvidence(id: string, version: string, since?: string): string[] {
     )
 }
 
-/** Quarantines `version`; a failure to file is notified, never thrown. */
-function quarantineRelease(r: Parameters<typeof quarantine>[1]): void {
+/** Quarantines `version` and returns the issue URL; a failure to file is notified, never thrown. */
+function quarantineRelease(r: Parameters<typeof quarantine>[1]): string | undefined {
   try {
     const filed = quarantine(project, r)
     record({
@@ -2072,11 +2177,24 @@ function quarantineRelease(r: Parameters<typeof quarantine>[1]): void {
       note: `v${r.version}: ${r.cause} (${filed.action})`,
     })
     notify(`harness v${r.version} quarantined: ${r.cause} — ${filed.url}`)
+    return filed.url
   } catch (error) {
     notify(
       `harness v${r.version} should be quarantined (${r.cause}) but filing failed: ${error instanceof Error ? error.message : String(error)}`,
     )
+    return undefined
   }
+}
+
+/** After a quarantine, or when the release is not to blame, the canary's claim ends. */
+function closeCanary(
+  c: CanaryClaim | undefined,
+  quarantineUrl: string | undefined,
+  reason: string,
+) {
+  settleCanary(c, (claim) =>
+    quarantineUrl ? markQuarantined(claim, quarantineUrl, ROOT) : releaseClaim(claim, reason, ROOT),
+  )
 }
 
 /**
@@ -2086,7 +2204,7 @@ function quarantineRelease(r: Parameters<typeof quarantine>[1]): void {
  */
 async function rollbackCrashed(
   opts: Options,
-  probation: { version: string; from: string },
+  probation: Probation,
   child: { code: number; since: string },
 ): Promise<boolean> {
   const { version, from } = probation
@@ -2110,9 +2228,14 @@ async function rollbackCrashed(
     notify(
       `preflight fails on v${from} too (${error instanceof Error ? error.message : String(error)}); v${version} is not quarantined and the loop stops`,
     )
+    closeCanary(
+      probation.canary,
+      undefined,
+      `its driver exited and preflight fails on v${from} too`,
+    )
     return false
   }
-  quarantineRelease({
+  const url = quarantineRelease({
     version,
     from,
     cause: `the loop driver exits with code ${child.code}`,
@@ -2123,6 +2246,7 @@ async function rollbackCrashed(
         .map((r) => `${r.feature}: ${r.outcome}${r.note ? ` — ${r.note.slice(0, 200)}` : ''}`),
     ],
   })
+  closeCanary(probation.canary, url, 'quarantine filing failed')
   return true
 }
 
@@ -2256,6 +2380,7 @@ export async function loopCommand(argv: string[]): Promise<number> {
     return true
   }
 
+  keepClaim(carry.probation?.canary ?? carry.retry?.canary)
   const snapshot = (): Carry => ({
     ...carry,
     attempted: [...attempted],
@@ -2357,7 +2482,18 @@ export async function loopCommand(argv: string[]): Promise<number> {
       const result = probationResult(outcome)
       if (result === 'passed') {
         carry.probation = undefined
+        keepClaim(undefined)
         log(`harness v${probation.version} passed its probation on ${feature.id}`)
+        settleCanary(probation.canary, (c) =>
+          markVerified(
+            c,
+            [
+              `${feature.id} — ${feature.title}: done on v${probation.version}`,
+              ...runEvidence(feature.id, probation.version, started),
+            ],
+            ROOT,
+          ),
+        )
         record({
           ts: new Date().toISOString(),
           feature: 'harness',
@@ -2367,7 +2503,7 @@ export async function loopCommand(argv: string[]): Promise<number> {
           turns: 0,
           minutes: 0,
           trace: '',
-          note: `${feature.id} passed on v${probation.version}`,
+          note: `${feature.id} passed on v${probation.version}${probation.canary ? '; verified as canary' : ''}`,
         })
       } else if (result === 'suspect') {
         carry.probation = undefined
@@ -2399,21 +2535,32 @@ export async function loopCommand(argv: string[]): Promise<number> {
           from: probation.from,
           evidence,
           intake,
+          canary: probation.canary,
         }
+        // The restart blocks this process's timer; the restarted driver renews from the carry.
+        keepClaim(undefined)
+        settleCanary(probation.canary, (c) => renewClaim(c, config.update.canaryHours, ROOT))
         return restart(snapshot()).code
       }
     }
     if (retry) {
       carry.retry = undefined
       const evidence = [...retry.evidence, ...runEvidence(feature.id, packageVersion(), started)]
+      keepClaim(undefined)
       if (outcome === 'done') {
-        quarantineRelease({
+        const url = quarantineRelease({
           version: retry.suspect,
           from: retry.from,
           cause: `${feature.id} did not pass on v${retry.suspect} and passed on v${retry.from}`,
           evidence: [...evidence, `${feature.id} on v${retry.from}: done`],
         })
+        closeCanary(retry.canary, url, 'quarantine filing failed')
       } else {
+        closeCanary(
+          retry.canary,
+          undefined,
+          `${feature.id} did not pass on v${retry.from} either, so the test was inconclusive`,
+        )
         record({
           ts: new Date().toISOString(),
           feature: 'harness',

@@ -53,13 +53,19 @@ runs `scripts/release.ts` on the commits since the last `v*` tag:
   it and pushes both to `main`, then creates the GitHub release. Sessions never bump the version,
   edit the changelog or tag.
 
+**Rollout.** Each release also gets a `rollout vX.Y.Z` issue. The first project loop that starts a
+feature claims it there and tests the release as its canary. When that test passes, the issue is
+marked verified, and only then do the other projects take the release
+([how-it-works.md](how-it-works.md#4-operating-the-loop)).
+
 **Quarantine.** To keep projects off a bad release, open an issue in this repository labelled
 `harness-quarantine` with the version in its title (loops with `update.auto` file one themselves
 when a release regresses). Close it as **not planned** to lift it; the fix PR closes it as
 completed, which keeps the bad release quarantined.
 
 One-time setup: `main` is protected, so `GITHUB_TOKEN` cannot push the release commit. Create a
-fine-grained personal access token with **Contents: read and write** on `Eemelinen/harness`, store it
+fine-grained personal access token with **Contents: read and write** and **Issues: read and write**
+(for the rollout issue) on `Eemelinen/harness`, store it
 as the repository secret `RELEASE_TOKEN`, and let it bypass the `main` protection (branch protection:
 allow its owner to bypass; a ruleset: add its owner to the bypass list). Without the secret the
 checkout fails and nothing is released.

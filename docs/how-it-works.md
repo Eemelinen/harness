@@ -140,19 +140,26 @@ rely on `allowedTools` alone.
 | `pnpm harness:feature list`               | Queue overview with `[ready]` / `[ready, human-only]` markers.                                                                                                            |
 
 **Staying on the newest harness (rollout safety).** With `update.auto`, the loop moves to new
-harness releases on its own before it starts a feature, in stages, so a bad release is caught in one
-project and kept away from the others:
+harness releases on its own before it starts a feature. One project, the canary, tests each
+release first, so a bad release is caught there and kept away from the others:
 
-1. **Which release.** The driver reads the harness repository's GitHub releases and its
-   `harness-quarantine` issues (with `gh`). It takes the newest release that meets all of these:
-   - newer than the installed one
-   - not a draft or prerelease
-   - not breaking, unless `update.allowBreaking` is set
-   - not quarantined
-   - at least `update.minAgeHours` old (default 6)
+1. **Which release.** The driver reads the harness repository's GitHub releases, its
+   `harness-quarantine` issues and its `harness-rollout` issues (with `gh`). It considers releases
+   that are newer than the installed one, not a draft or prerelease, not quarantined, and not
+   breaking unless `update.allowBreaking` is set.
+   - **Verified release:** if the newest one has been verified by a canary, the driver takes it.
+   - **Untested release:** otherwise the first loop with `update.canary` (on by default) that gets
+     here claims it and becomes its canary.
+     - **The claim:** a comment on the release's rollout issue `rollout vX.Y.Z`, which the release
+       workflow opens. If two loops claim at once, the earliest comment wins, and the other deletes
+       its own.
+     - **Renewal:** the canary renews the claim every 30 minutes while it tests. A claim that isn't
+       renewed for `update.canaryHours` (default 4) lapses, and the next loop may claim the release.
+   - **Another project testing:** while another project's claim holds the newest release, a loop
+     takes an older verified release if there is one, and otherwise waits.
+   - **Opted out:** a project with `update.canary: false` only ever takes verified releases.
 
-   One canary project with `minAgeHours: 0` takes each release first. The others follow once it has
-   been out a while. A newer release that is breaking is reported, not taken.
+   A breaking release is reported, not taken.
 
 2. **Selftest before the PR.** In a `harness/update-vX.Y.Z` worktree the driver pins the package and
    the plugin marketplace ref (the steps of `pnpm harness:update`). Then it runs `harness selftest`
@@ -169,7 +176,8 @@ project and kept away from the others:
 **Probation.** The first feature after an update runs on probation, and what happens next depends on
 how it ends:
 
-- **It ends `done`:** the release stays (`probation-ok`).
+- **It ends `done`:** the release stays (`probation-ok`). For the canary, that run verifies the
+  release: its rollout issue gets the result, the `harness-verified` label, and is closed.
 - **It fails, is blocked or hits a driver error:** the release is suspect.
   1. The driver keeps that run as branch `harness/probation-vX.Y.Z-F-NNN` and deletes the feature
      branch, so the attempt and any auto-block don't count against the feature.
@@ -186,6 +194,10 @@ If the restarted driver itself exits with an error before its first feature sett
 driver, which is still waiting for it, rolls back. It runs its own preflight on the old version and
 quarantines the release only when that passes, so an environment problem doesn't count against the
 release. A rollback that can't auto-merge stops the loop, so nothing more runs on a suspect release.
+
+When the canary's update doesn't merge, or its re-test is inconclusive, it releases its claim so
+another loop can test the release. A quarantine closes the rollout issue with a link to the
+quarantine issue.
 
 These steps run in the version the project rolls back to. They are complete only in projects whose
 previous release already has them.

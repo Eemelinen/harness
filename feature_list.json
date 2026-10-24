@@ -132,6 +132,19 @@
       "evidence": ["2026-10-24 pnpm check → pass (working tree on a2ecf8e)"],
       "attempts": 0,
       "notes": "Requested 2026-10-24: a harness regression must not burn feature attempts and must be traced to the release that caused it."
+    },
+    {
+      "id": "F-009",
+      "priority": 9,
+      "area": "loop",
+      "title": "Canary rollout: the first loop tests a release, the others take only verified ones",
+      "user_visible_behavior": "Each release gets a rollout issue in the harness repository. The first project loop with update.auto and update.canary that starts a feature claims the release there (earliest active claim comment wins), updates and runs its probation, renewing the claim while it tests. A pass marks the release verified; other projects take only verified releases. A claim lapses after update.canaryHours (default 4) without renewal, so another loop may take over. A failed update or an inconclusive re-test releases the claim; a quarantine closes the rollout issue.",
+      "status": "passing",
+      "depends_on": ["F-008"],
+      "verification": ["L1: pnpm check"],
+      "evidence": ["2026-10-24 pnpm check → pass (working tree on 38c2998)"],
+      "attempts": 0,
+      "notes": "Requested 2026-10-24: replace the fixed waiting time (update.minAgeHours, unreleased) with a first-come canary, so no project takes a release nobody tested. The 4 h the user called the quarantine time is the claim window."
     }
   ]
 }

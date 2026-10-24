@@ -220,8 +220,13 @@ export const configSchema = z.object({
       auto: z.boolean().default(false),
       /** Also take a breaking release (a new major version; a new minor version while 0.x). */
       allowBreaking: z.boolean().default(false),
-      /** A release must be out this long before the loop takes it; 0 for the canary project. */
-      minAgeHours: z.number().nonnegative().default(6),
+      /**
+       * This project may be the first to test a release (the canary, src/rollout.ts); `false`
+       * takes only releases another project verified.
+       */
+      canary: z.boolean().default(true),
+      /** How long a canary's claim on a release lasts without renewal. */
+      canaryHours: z.number().positive().default(4),
     })
     .prefault({}),
   /** The loop's look back at its own runs (`harness retro`, docs/self-improvement.md). */

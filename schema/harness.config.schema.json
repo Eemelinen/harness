@@ -704,10 +704,14 @@
           "default": false,
           "type": "boolean"
         },
-        "minAgeHours": {
-          "default": 6,
+        "canary": {
+          "default": true,
+          "type": "boolean"
+        },
+        "canaryHours": {
+          "default": 4,
           "type": "number",
-          "minimum": 0
+          "exclusiveMinimum": 0
         }
       }
     },

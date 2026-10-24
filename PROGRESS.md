@@ -13,8 +13,8 @@ this file to change on every branch; keep that heading text exactly.
 - The repository runs its own loop: features come from `harness-retro` issues filed by project
   retros (docs/self-improvement.md). Merges that change a shipped path are released by
   `.github/workflows/release.yml` (docs/developing.md → Releasing); it needs the `RELEASE_TOKEN` secret.
-- Last verified: F-008 on this branch, `pnpm check` green on 2026-10-24.
-- Highest-priority unfinished feature: none (F-000…F-008 passing).
+- Last verified: F-009 on this branch, `pnpm check` green on 2026-10-24.
+- Highest-priority unfinished feature: none (F-000…F-009 passing).
 - Current blocker: none.
 
 ## Next Steps
@@ -24,10 +24,11 @@ this file to change on every branch; keep that heading text exactly.
    a workflow, so it waits for a human. The merge should release v0.3.1 on its own; check the
    Actions run.
 2. Move the projects to that release once (`pnpm harness:update`, then `pnpm check` and a commit).
-   Then turn on `"update": { "auto": true, "minAgeHours": 0 }` in one canary project only, and run
-   the drill: an update ends in `probation-ok`; a quarantine issue opened by hand makes it roll back;
-   closing the issue as not planned lifts it. After that, turn on `"update": { "auto": true }` in the
-   other projects that run `merge: "auto"`.
+   Add Issues: read and write to `RELEASE_TOKEN`. Turn on `"update": { "auto": true }` in two
+   projects with `merge: "auto"`, then run the drill on the next release. The first loop claims it on
+   `rollout vX`, the other logs "being tested by …", and the release is verified after probation and
+   taken by the other. A canary loop stopped mid-test lets its claim lapse after 4 h. A quarantine
+   issue opened by hand makes the projects roll back.
 3. Build open `harness-retro` issues as they arrive (`pnpm harness:loop`, intake picks them up).
 
 ## Session Log
@@ -56,8 +57,8 @@ this file to change on every branch; keep that heading text exactly.
   here. All three projects passed it read-only. The release script now reads breaking changes from
   the config schema diff, because loop PR titles never carry `!`. Run records carry the harness
   version. Verification: `pnpm harness:verify F-006`.
-- F-007 (part 2 of 3): `pickTarget` takes the newest release that is old enough
-  (`update.minAgeHours`, default 6; 0 for a canary), not breaking and not quarantined. Releases and
+- F-007 (part 2 of 3): `pickTarget` took the newest release that was old enough
+  (`update.minAgeHours`, replaced by F-009), not breaking and not quarantined. Releases and
   `harness-quarantine` issues are read with `gh`; `git ls-remote` is only a fallback for
   `harness update` without `gh`. A project on a quarantined release moves forward to the fix or back
   (`harness/rollback-vX`). The update PR runs the old and the new selftest, and a regression
@@ -69,6 +70,13 @@ this file to change on every branch; keep that heading text exactly.
   old version quarantines the release; failing again clears it. The parent driver supervises the
   restarted one. A non-zero exit with no settled probation means a rollback, then the old preflight
   as an A/B check, then quarantine. Verification: `pnpm harness:verify F-008`.
+- F-009: the fixed waiting time (`update.minAgeHours`, never released) is replaced by a canary
+  rollout. The release workflow opens `rollout vX.Y.Z`. The first loop with `update.canary` claims
+  it in a comment (earliest live claim wins), renews the claim every 30 min while on probation, and
+  marks the release verified when the probation passes. Others take only verified releases. A claim
+  lapses after `update.canaryHours` (4; the "quarantine time" in the request). A failed update or an
+  inconclusive re-test releases it; a quarantine closes the issue. `RELEASE_TOKEN` now also needs
+  Issues: read and write. Verification: `pnpm harness:verify F-009`.
 - Bootstrapping: rollback and re-test run in the version a project rolls back to, so they are
   complete only from the release after the one that ships F-008. Until then the staged rollout and
   the selftest (F-007) are the guard.
