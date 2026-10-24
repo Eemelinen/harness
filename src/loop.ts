@@ -26,15 +26,13 @@
  * which quarantines the release when it passes there. The previous driver waits for the restarted
  * one and rolls back when it crashes before that (supervise).
  */
-import { spawn, spawnSync } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import {
   appendFileSync,
   createWriteStream,
   existsSync,
   mkdirSync,
-  readdirSync,
   readFileSync,
-  statSync,
   writeFileSync,
 } from 'node:fs'
 import { createRequire } from 'node:module'
@@ -77,8 +75,8 @@ import {
   type IntakeItem,
 } from './retro'
 import { hardStops, parseSafetyVerdict, type SafetyVerdict, type Snapshot } from './review'
-import { PACKAGE_ROOT, sh as run, sessionEnv, shellLine } from './run'
-import { excerptLog, quarantine } from './quarantine'
+import { PACKAGE_ROOT, sh as run, sessionEnv, shellLine, spawnTee } from './run'
+import { crashMessage, excerptLog, quarantine } from './quarantine'
 import {
   claim,
   ensureRolloutIssue,
@@ -2122,10 +2120,10 @@ function keepClaim(c: CanaryClaim | undefined) {
  * version the pins moved to: if ROOT has another one installed, the restart would run the wrong
  * code, so it stops with an error instead.
  */
-function restart(
+async function restart(
   carry: Carry,
   expected: string,
-): { code: number; signal: string | null; since: string } {
+): Promise<{ code: number; signal: string | null; since: string; log: string }> {
   const actual = installedVersion(ROOT)
   if (actual !== expected)
     throw new Error(
@@ -2133,13 +2131,16 @@ function restart(
     )
   const bin = installedBin(ROOT)
   const since = new Date().toISOString()
-  log(`restarting the driver on harness ${path.relative(ROOT, bin)}`)
-  const child = spawnSync(process.execPath, [bin, ...process.argv.slice(2)], {
+  // The restarted driver's output also goes to a log, so a crash keeps its error for the evidence.
+  const logPath = path.join(ROOT, config.traceDir, `driver-v${expected}-${stamp()}.log`)
+  log(
+    `restarting the driver on harness v${expected}; its output also goes to ${path.relative(ROOT, logPath)}`,
+  )
+  const child = await spawnTee(process.execPath, [bin, ...process.argv.slice(2)], logPath, {
     cwd: process.cwd(),
-    stdio: 'inherit',
     env: { ...process.env, [CARRY_ENV]: JSON.stringify(carry) },
   })
-  return { code: child.status ?? 1, signal: child.signal, since }
+  return { ...child, since, log: logPath }
 }
 
 /**
@@ -2200,17 +2201,6 @@ function runDetails(
   }
 }
 
-/** The newest readable log written since `since` (a restarted driver's, after it exited). */
-function newestLogSince(since: string): string | undefined {
-  const dir = path.join(ROOT, config.traceDir)
-  if (!existsSync(dir)) return undefined
-  return readdirSync(dir)
-    .filter((f) => f.endsWith('.log'))
-    .map((f) => path.join(dir, f))
-    .filter((f) => statSync(f).mtime.toISOString() >= since)
-    .sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs)[0]
-}
-
 /** Quarantines `version` and returns the issue URL; a failure to file is notified, never thrown. */
 function quarantineRelease(r: Parameters<typeof quarantine>[1]): string | undefined {
   try {
@@ -2256,18 +2246,16 @@ function closeCanary(
 async function rollbackCrashed(
   opts: Options,
   probation: Probation,
-  child: { code: number; since: string },
+  child: { code: number; since: string; log: string },
 ): Promise<boolean> {
   const { version, from } = probation
+  const output = existsSync(child.log) ? readFileSync(child.log, 'utf8') : ''
+  const message = crashMessage(output)
+  const exit = `exited with code ${child.code}${message ? `: ${message}` : ''}`
   notify(
-    `the driver on harness v${version} exited with code ${child.code} before its first feature settled; rolling back to v${from}`,
+    `the driver on harness v${version} ${exit} before its first feature settled; rolling back to v${from}`,
   )
-  const moved = await pinPr(
-    from,
-    version,
-    opts,
-    `the driver on v${version} exited with code ${child.code}`,
-  )
+  const moved = await pinPr(from, version, opts, `the driver on v${version} ${exit}`)
   if (moved.state !== 'merged') {
     notify(`the rollback to v${from} did not merge; stopping the loop`)
     return false
@@ -2286,13 +2274,12 @@ async function rollbackCrashed(
     )
     return false
   }
-  const log = newestLogSince(child.since)
   const url = quarantineRelease({
     version,
     from,
-    cause: `the loop driver exits with code ${child.code}`,
-    traces: log ? [log] : undefined,
-    excerpt: log ? excerptLog(readFileSync(log, 'utf8')) : undefined,
+    cause: `the loop driver ${exit}`,
+    traces: [child.log],
+    excerpt: output ? excerptLog(output) : undefined,
     evidence: [
       `the loop driver on v${version} exited with code ${child.code} before its first feature settled; the preflight of v${from} passes in the same checkout`,
       ...readRunRecords()
@@ -2465,7 +2452,7 @@ export async function loopCommand(argv: string[]): Promise<number> {
     const moved = carry.retry ? undefined : await maybeUpdate(opts, carry)
     if (moved) {
       const probation = carry.probation
-      const child = restart(snapshot(), moved)
+      const child = await restart(snapshot(), moved)
       await new Promise((resolve) => setImmediate(resolve)) // let a pending SIGINT handler run
       const verdict = supervise({
         code: child.code,
@@ -2614,7 +2601,7 @@ export async function loopCommand(argv: string[]): Promise<number> {
         // The restart blocks this process's timer; the restarted driver renews from the carry.
         keepClaim(undefined)
         settleCanary(probation.canary, (c) => renewClaim(c, config.update.canaryHours, ROOT))
-        return restart(snapshot(), probation.from).code
+        return (await restart(snapshot(), probation.from)).code
       }
     }
     if (retry) {

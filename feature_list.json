@@ -197,6 +197,19 @@
       "evidence": ["2026-10-24 pnpm check → pass (working tree on 36884f4)"],
       "attempts": 0,
       "notes": "Found 2026-10-24 in metsavahti: after updating to v0.3.2 and later v0.3.3 the driver logged restarted on harness v0.3.1. require.resolve returned the cached real path of the old package, so the child ran v0.3.1 code against v0.3.2 pins, failed the doctor with exit 1, and the supervisor rolled back and quarantined v0.3.2 (issue #11), a false alarm. Every release up to v0.3.4 has this restart bug in the parent, so projects need one hand update to the fix."
+    },
+    {
+      "id": "F-014",
+      "priority": 14,
+      "area": "loop",
+      "title": "Keep a restarted driver output for the evidence",
+      "user_visible_behavior": "When the driver restarts itself on a new harness release, the new driver output is shown in the terminal and also written to .harness/traces/driver-vX.Y.Z-<time>.log. If that driver exits non-zero before its first feature settles, the rollback PR names its error line, and the quarantine issue carries the error line in its cause, an excerpt of the output and the log path.",
+      "status": "passing",
+      "depends_on": ["F-013"],
+      "verification": ["L1: pnpm check"],
+      "evidence": ["2026-10-24 pnpm check → pass (working tree on 579b4a8)"],
+      "attempts": 0,
+      "notes": "Proposed by harness-updater triage of harness #11 (2026-10-24): that quarantine said only that the driver exited with code 1, because the restarted driver wrote to the terminal only; the cause (F-013) was found in a terminal transcript."
     }
   ]
 }
