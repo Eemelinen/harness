@@ -3,6 +3,38 @@
 Releases are git tags (`vX.Y.Z`). Projects pin the package and the plugin marketplace to the same
 tag; see [docs/developing.md](docs/developing.md).
 
+## v0.3.0 — 2026-10-24
+
+- **The harness can improve itself.** `harness retro` collects the signals where the harness got in
+  its own way (guard blocks, permission denials, driver errors, evaluator revisions, sessions near
+  a cap). A read-only session separates harness defects from project setup problems, and each
+  finding is filed as a `harness-retro` issue in the repository that owns the fix, deduplicated by
+  fingerprint.
+  - With `retro.intake`, a loop builds its repository's open retro issues as features; the PR
+    closes the issue.
+  - `retro.every` and `retro.onQueueEmpty` run retros from the loop.
+  - All of it is off by default ([docs/self-improvement.md](docs/self-improvement.md)).
+- **Loop PRs that change what sessions may do go through a merge gate.** A PR that touches a
+  `reviewPaths` file (default `.claude/*`, `.github/workflows/*`, `harness.config.json`) is no
+  longer auto-merged unchecked. Hard stops always wait for a human: reviewPaths shrinking, review
+  settings or the permission mode changing, blanket allows, removed deny rules,
+  `bypassPermissions`, the harness plugin disabled. Everything else goes to a read-only
+  safety-review session, and a `safe` answer auto-merges with the review in the PR body. Set
+  `review.mode: "human"` to make every such PR wait.
+- **Loop sessions no longer run the evaluator themselves.** About 15 overnight generator sessions
+  launched `harness:evaluator` before clock-out and idled until it answered, although the driver
+  evaluates afterwards anyway. The guard now denies that agent call under `HARNESS_LOOP=1`, and the
+  clock-out skill and generator prompt say so up front. Projects can drop the matching line from
+  their generator notes.
+- **Guard rules ignore heredoc data.** A Python edit or a `git commit -F - <<EOF` message that
+  mentioned `pnpm db:up`, `git push` or `npm install` was blocked. Heredoc bodies are now dropped
+  before matching unless the heredoc feeds a shell (`bash <<EOF`).
+- **Resumed sessions report all their turns.** A session resumed by a wakeup or a background task
+  recorded only its last segment's turns (87 + 18 + 2 turns showed as 2) in `runs.jsonl`, the PR
+  body and `harness report`.
+- **Merged leftover branches are no longer called in flight.** The queue-empty notice lists
+  branches whose feature is already passing as leftovers that are safe to delete.
+
 ## v0.2.0 — 2026-10-23
 
 - **The loop fixes red CI on its own PRs.** Before, a failed required check on an auto-merge PR
