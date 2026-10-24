@@ -1,6 +1,6 @@
 {
   "project": "harness",
-  "last_updated": "2026-10-23",
+  "last_updated": "2026-10-24",
   "rules": {
     "single_active_feature": true,
     "passing_requires_evidence": true,
@@ -28,6 +28,45 @@
       ],
       "attempts": 0,
       "notes": "Retro features are added by the loop's intake (docs/self-improvement.md)."
+    },
+    {
+      "id": "F-001",
+      "priority": 1,
+      "area": "loop",
+      "title": "Loop sessions cannot launch the evaluator agent",
+      "user_visible_behavior": "In a driver-run session (HARNESS_LOOP=1) the guard denies an Agent/Task call for the harness:evaluator subagent with a reason that says the driver runs the evaluator; interactive sessions can still launch it. The generator and CI-fixer prompts and the clock-out skill say the same.",
+      "status": "passing",
+      "depends_on": [],
+      "verification": ["L1: pnpm check"],
+      "evidence": ["2026-10-24 pnpm check → pass (working tree on 38b450f)"],
+      "attempts": 0,
+      "notes": "Found 2026-10-24 in the overnight loops of idea-generator, personal-finances and metsavahti: about 15 generator sessions launched harness:evaluator before clock-out and idled on ScheduleWakeup for it, although clock-out step 7 says to skip it under HARNESS_LOOP=1. The driver evaluates anyway, so the review ran twice."
+    },
+    {
+      "id": "F-002",
+      "priority": 2,
+      "area": "loop",
+      "title": "Session stats count every turn of a resumed session",
+      "user_visible_behavior": "When a stream-json session emits several result messages (it was resumed by a wakeup or a background-task notification), runs.jsonl, the PR body and harness report show the sum of their num_turns, not only the last segment.",
+      "status": "passing",
+      "depends_on": [],
+      "verification": ["L1: pnpm check"],
+      "evidence": ["2026-10-24 pnpm check → pass (working tree on 654e8aa)"],
+      "attempts": 0,
+      "notes": "personal-finances F-015 attempt 1 emitted results with 87, 18 and 2 turns; runs.jsonl recorded 2. Several $3–10 sessions show 1–4 turns. total_cost_usd is already cumulative."
+    },
+    {
+      "id": "F-003",
+      "priority": 3,
+      "area": "loop",
+      "title": "Queue-empty notice lists only unmerged feature branches",
+      "user_visible_behavior": "The queue-empty notice no longer names features that are already passing on the default branch as in flight; it names their leftover branches separately so a human can delete them.",
+      "status": "passing",
+      "depends_on": [],
+      "verification": ["L1: pnpm check"],
+      "evidence": ["2026-10-24 pnpm check → pass (working tree on a2a17d1)"],
+      "attempts": 0,
+      "notes": "idea-generator feat/F-006 and personal-finances feat/F-002 survived their merges (the first merge before delete_branch_on_merge was on), so every queue-empty notice said they were in flight."
     }
   ]
 }

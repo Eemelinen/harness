@@ -143,7 +143,7 @@ interface ClaudeResult {
   timedOut: boolean
   /** The session's init event did not list the harness plugin; it was stopped. */
   pluginMissing: boolean
-  /** The final `result` message of the stream (or the single JSON result). */
+  /** The final `result` message of the stream with every segment's turns (or the single JSON result). */
   result?: Record<string, unknown>
 }
 
@@ -154,6 +154,20 @@ interface ClaudeRun {
   traceFile: string
   wallClockMs: number
   stream: boolean
+}
+
+/**
+ * A stream-json session emits one `result` per segment: a wakeup or a background-task
+ * notification resumes it and ends in another. `num_turns` counts only that segment, while
+ * `total_cost_usd` and `modelUsage` are session totals, so the turns are summed and everything
+ * else comes from the last segment.
+ */
+export function mergeResult(
+  prev: Record<string, unknown> | undefined,
+  next: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!prev) return next
+  return { ...next, num_turns: Number(prev.num_turns ?? 0) + Number(next.num_turns ?? 0) }
 }
 
 let currentChild: ReturnType<typeof spawn> | undefined
@@ -194,7 +208,7 @@ function runClaude(runSpec: ClaudeRun): Promise<ClaudeResult> {
       } catch {
         return // non-JSON line (e.g. a warning); kept in the trace
       }
-      if (msg.type === 'result') result = msg
+      if (msg.type === 'result') result = mergeResult(result, msg)
       for (const out of describeEvent(msg, state)) log(out)
       if (
         msg.type === 'system' &&
@@ -274,6 +288,27 @@ export function pluginDir(dir: string, driverRoot: string = PACKAGE_ROOT): strin
 
 function branchFor(id: string) {
   return `${config.project.branchPrefix}${id}`
+}
+
+/**
+ * The notice when nothing is ready. A branch whose feature is already passing on the default
+ * branch is a leftover of a merged PR (a merge before delete-branch-on-merge was on), not work in
+ * flight, so it is named separately for a human to delete.
+ */
+export function queueEmptyNotice(
+  inFlight: string[],
+  list: { features: Pick<Feature, 'id' | 'status'>[] },
+  branchPrefix: string,
+): string {
+  const passing = new Set(list.features.filter((f) => f.status === 'passing').map((f) => f.id))
+  const open = inFlight.filter((id) => !passing.has(id))
+  const stale = inFlight.filter((id) => passing.has(id))
+  let notice = 'queue empty'
+  if (open.length)
+    notice += ` (${open.join(', ')} in flight — merge their PRs to unblock dependents)`
+  if (stale.length)
+    notice += `; leftover branches of passing features, safe to delete: ${stale.map((id) => `${branchPrefix}${id}`).join(', ')}`
+  return notice
 }
 
 function worktreePath(id: string) {
@@ -1676,10 +1711,7 @@ export async function loopCommand(argv: string[]): Promise<number> {
     if (!feature) {
       // A retro may file issues the intake picks up; look again before stopping.
       if (retroIfDue('queue-empty') && config.retro.intake) continue
-      const waiting = inFlight.length
-        ? ` (${inFlight.join(', ')} in flight — merge their PRs to unblock dependents)`
-        : ''
-      notify(`queue empty${waiting}`)
+      notify(queueEmptyNotice(inFlight, list, config.project.branchPrefix))
       break
     }
     attempted.add(feature.id)
