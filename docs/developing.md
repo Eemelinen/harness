@@ -9,6 +9,7 @@ keeps an experiment in one project from breaking the others.
 pnpm install
 pnpm check          # typecheck, format:check, unit tests
 pnpm schema         # after changing src/config.ts; tests fail while the schema file is stale
+pnpm harness:selftest   # prompts, guard and hooks run against this repository (part of check)
 ```
 
 The plugin hooks (`plugin/hooks/*.mjs`) must stay dependency-free: they run from Claude Code's
@@ -32,14 +33,54 @@ linked package means driver runs use your checkout as well. Do not commit the `l
 
 ## Releasing
 
-1. **Version and changelog.** Bump `version` in `package.json` (semver: a config key removed or
-   renamed, or a changed CLI flag, is a major change). Add the entry to `CHANGELOG.md`.
-2. **Check.** Run `pnpm check`.
-3. **Commit and tag.** Commit, then `git tag vX.Y.Z && git push origin main vX.Y.Z`.
-4. **Update each project:**
-   - `pnpm add -D "@eemelinen/harness@github:Eemelinen/harness#vX.Y.Z"`
-   - set the marketplace `ref` in `.claude/settings.json` to `vX.Y.Z`
-   - `pnpm harness:doctor`, then `pnpm check`
-   - commit as `chore(harness): update to vX.Y.Z`
-   - interactive sessions pick the new plugin up after `claude plugin marketplace update eemelinen-harness`
-     (or a restart with auto-update on)
+Releases are automatic. After CI passes on `main`, [release.yml](../.github/workflows/release.yml)
+runs `scripts/release.ts` on the commits since the last `v*` tag:
+
+- **Only shipped changes release.** If no path in `package.json` `files` (`bin`, `src`, `prompts`,
+  `plugin`, `schema`, `templates`, `.claude-plugin`) and not `package.json` itself changed, nothing
+  is released: docs, tests and state files reach no project.
+- **Version.** Every release bumps the patch number. A breaking change (a config key removed or
+  renamed, a changed CLI flag) bumps the minor number while the version is 0.x and the major number
+  after that; mark it with `!` in the commit subject (`feat(F-012)!: …`) or a `BREAKING CHANGE:`
+  footer. Squash merges keep the PR title as the subject, so put the `!` there. Loop PRs never
+  carry the `!`, so the script also compares `schema/harness.config.schema.json` with the last
+  tag's: a removed key, a newly required key, a changed or dropped default or a removed enum value
+  makes the release breaking, and the changelog says which.
+- **Changelog.** One `CHANGELOG.md` bullet per commit subject (without its `type(scope):`
+  prefix); `docs`, `test`, `ci` and `style` commits are left out. The same lines become the GitHub
+  release notes.
+- **Commit, tag, push.** The workflow commits `chore: release vX.Y.Z` (version and changelog), tags
+  it and pushes both to `main`, then creates the GitHub release. Sessions never bump the version,
+  edit the changelog or tag.
+
+**Rollout.** Each release also gets a `rollout vX.Y.Z` issue. The first project loop that starts a
+feature claims it there and tests the release as its canary. When that test passes, the issue is
+marked verified, and only then do the other projects take the release
+([how-it-works.md](how-it-works.md#4-operating-the-loop)).
+
+**Quarantine.** To keep projects off a bad release, open an issue in this repository labelled
+`harness-quarantine` with the version in its title (loops with `update.auto` file one themselves
+when a release regresses). Close it as **not planned** to lift it; the fix PR closes it as
+completed, which keeps the bad release quarantined.
+
+One-time setup: `main` is protected, so `GITHUB_TOKEN` cannot push the release commit. Create a
+fine-grained personal access token with **Contents: read and write** and **Issues: read and write**
+(for the rollout issue) on `Eemelinen/harness`, store it
+as the repository secret `RELEASE_TOKEN`, and let it bypass the `main` protection (branch protection:
+allow its owner to bypass; a ruleset: add its owner to the bypass list). Without the secret the
+checkout fails and nothing is released.
+
+To release by hand (a release that failed, or a change the filter skipped), re-run the workflow
+from the Actions tab, or run the same steps locally: `pnpm exec tsx scripts/release.ts`, then
+`git push --atomic origin HEAD:main vX.Y.Z`.
+
+**Update each project** to a new release. A project with `update.auto` does it from its loop
+before the next feature ([how-it-works.md](how-it-works.md#4-operating-the-loop)). By hand:
+
+- `pnpm harness:update` (or `--to X.Y.Z`): pins the package with
+  `pnpm add -D "@eemelinen/harness@github:Eemelinen/harness#vX.Y.Z"`, sets the marketplace `ref`
+  in `.claude/settings.json` to `vX.Y.Z` and runs the new version's `harness doctor`
+- `pnpm check`
+- commit as `chore(harness): update to vX.Y.Z`
+- interactive sessions pick the new plugin up after `claude plugin marketplace update eemelinen-harness`
+  (or a restart with auto-update on)

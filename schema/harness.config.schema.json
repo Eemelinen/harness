@@ -692,6 +692,29 @@
         }
       }
     },
+    "update": {
+      "default": {},
+      "type": "object",
+      "properties": {
+        "auto": {
+          "default": false,
+          "type": "boolean"
+        },
+        "allowBreaking": {
+          "default": false,
+          "type": "boolean"
+        },
+        "canary": {
+          "default": true,
+          "type": "boolean"
+        },
+        "canaryHours": {
+          "default": 4,
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      }
+    },
     "retro": {
       "default": {},
       "type": "object",

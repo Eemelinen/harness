@@ -90,9 +90,27 @@ fix on an auto-merge PR passes the same gate before it is pushed; if it now need
 driver disables auto-merge and hands the PR over. A held PR's body says why, the driver notifies
 you, and the loop continues with features that do not depend on it.
 
-Harness fixes reach a project only when you cut a release and move the project's pins
-([developing.md](developing.md)), so a fix the loop got wrong cannot spread to a running loop
-unnoticed.
+A merged harness fix is released automatically. It reaches a project when the project's pins move
+([developing.md](developing.md) → Releasing): by hand, or before the next feature when the project
+sets `update.auto`. With `update.auto`, a fix the loop got wrong can reach other projects' running
+loops. These layers keep it contained:
+
+- **In the harness repository:** its merge gate (`reviewPaths` with `review.mode: "human"` hold the
+  guard, hooks, prompts, loop, update and release code for a human), and CI with
+  `harness selftest`.
+- **When it ships:** breaking changes, including config schema breaks, are released as breaking,
+  and projects don't take those on their own.
+- **Canary rollout:** the first project loop to reach a release claims it and tests it. The
+  others take it only after that test passes.
+- **Per project:** the update PR's selftest against the installed version, its doctor and L1
+  baseline, and the project's CI.
+- **Probation:** the first feature on a new release. If it fails, the project rolls back and re-runs
+  the feature on the old release. A failure caused by the release costs the project one extra
+  feature run, not the feature's attempts.
+- **Quarantine:** a release found bad is held back from every project, and projects already on it
+  move off it ([how-it-works.md](how-it-works.md#4-operating-the-loop)).
+
+Leave `update.auto` off where that is still too much trust.
 
 ## Turning it on
 
@@ -121,5 +139,5 @@ with retros.
 - A harness finding is seen from one project's traces. The fingerprint merges reports of the same
   problem from several projects into one issue.
 - Fixes in the harness repository are built by that repository's own loop (it is a harness project
-  too). Until a release moves the pins, projects keep reporting the problem they still have; those
+  too). Until the project's pins move to the release, projects keep reporting the problem they still have; those
   reports land as comments on the closed issue.

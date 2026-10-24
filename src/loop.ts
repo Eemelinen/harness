@@ -16,8 +16,17 @@
  * the guard, Stop hook and skills match the pinned package version and do not depend on the
  * folder being trusted. A session whose init event does not list the plugin is stopped at once:
  * an unattended session without the guard must not run.
+ *
+ * With `update.auto`, before each feature the driver moves to the harness release pickTarget chooses
+ * (src/update.ts: verified by a canary, or claimed by this project as canary on its rollout issue,
+ * src/rollout.ts; not breaking, not quarantined) through its own pin-only PR, after the
+ * new version's selftest showed no regression; then it restarts itself on that version. See
+ * maybeUpdate and pinPr. The first feature on the new version runs on probation: if it does not
+ * pass, the run is set aside, the pins roll back and the feature runs again on the old version,
+ * which quarantines the release when it passes there. The previous driver waits for the restarted
+ * one and rolls back when it crashes before that (supervise).
  */
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import {
   appendFileSync,
   createWriteStream,
@@ -43,7 +52,7 @@ import {
 } from './ci'
 import { cleanState } from './clean-state'
 import { CONFIG_FILE, loadProject, worktreeRoot, type HarnessConfig, type Project } from './config'
-import { doctor } from './doctor'
+import { doctor, packageVersion } from './doctor'
 import { describeEvent, heartbeat, newStreamState } from './events'
 import {
   FEATURE_ID,
@@ -59,6 +68,7 @@ import {
   countFeatureRun,
   markQueued,
   nextIntake,
+  projectRepo,
   readRetroState,
   reviewReasons,
   runRetro,
@@ -66,6 +76,35 @@ import {
 } from './retro'
 import { hardStops, parseSafetyVerdict, type SafetyVerdict, type Snapshot } from './review'
 import { PACKAGE_ROOT, sh as run, shellLine } from './run'
+import { quarantine } from './quarantine'
+import {
+  claim,
+  ensureRolloutIssue,
+  listRollouts,
+  markQuarantined,
+  markVerified,
+  releaseClaim,
+  renewClaim,
+  rolloutStates,
+  type CanaryClaim,
+  type RolloutState,
+} from './rollout'
+import { regressions, type Check } from './selftest'
+import {
+  applyUpdate,
+  compareVersions,
+  installedBin,
+  isHarnessRepo,
+  listQuarantined,
+  listReleases,
+  notPinOnly,
+  PACKAGE,
+  pickTarget,
+  pinSpec,
+  rolloutRepo,
+  type PinSnapshot,
+  type Target,
+} from './update'
 
 export const PLUGIN_NAME = 'harness'
 
@@ -560,7 +599,20 @@ interface RunRecord {
   feature: string
   attempt: number
   outcome:
-    'pr' | 'merged' | 'blocked' | 'failed' | 'aborted' | 'pushed' | 'ci-fix' | 'ci-rerun' | 'retro'
+    | 'pr'
+    | 'merged'
+    | 'blocked'
+    | 'failed'
+    | 'aborted'
+    | 'pushed'
+    | 'ci-fix'
+    | 'ci-rerun'
+    | 'retro'
+    | 'updated'
+    | 'rolled-back'
+    | 'quarantined'
+    | 'probation-ok'
+    | 'probation-cleared'
   verdict?: string
   pr?: string
   costUsd: number
@@ -568,28 +620,42 @@ interface RunRecord {
   minutes: number
   trace: string
   note?: string
+  /** The harness version the run used, so a regression can be traced to its release. */
+  harness?: string
 }
 
 function record(rec: RunRecord) {
   const file = path.join(ROOT, config.runsLog)
   mkdirSync(path.dirname(file), { recursive: true })
-  appendFileSync(file, `${JSON.stringify(rec)}\n`)
+  appendFileSync(file, `${JSON.stringify(withHarnessVersion(rec))}\n`)
 }
 
-function report() {
+export function withHarnessVersion<T extends object>(
+  rec: T & { harness?: string },
+  version: string = packageVersion(),
+): T & { harness: string } {
+  return { ...rec, harness: rec.harness ?? version }
+}
+
+function readRunRecords(): RunRecord[] {
   const file = path.join(ROOT, config.runsLog)
-  if (!existsSync(file)) {
-    console.log('no runs recorded yet')
-    return
-  }
-  const rows = readFileSync(file, 'utf8')
+  if (!existsSync(file)) return []
+  return readFileSync(file, 'utf8')
     .split('\n')
     .filter(Boolean)
     .map((l) => JSON.parse(l) as RunRecord)
-  console.log('when              feature attempt outcome  verdict  turns  cost   min  pr')
+}
+
+function report() {
+  const rows = readRunRecords()
+  if (rows.length === 0) {
+    console.log('no runs recorded yet')
+    return
+  }
+  console.log('when              feature attempt outcome  verdict  turns  cost   min  harness  pr')
   for (const r of rows) {
     console.log(
-      `${r.ts.slice(0, 16).replace('T', ' ')} ${r.feature}   ${String(r.attempt).padEnd(7)} ${r.outcome.padEnd(8)} ${(r.verdict ?? '-').padEnd(8)} ${String(r.turns).padStart(5)}  $${r.costUsd.toFixed(2).padStart(5)} ${String(r.minutes).padStart(4)}  ${r.pr ?? ''}`,
+      `${r.ts.slice(0, 16).replace('T', ' ')} ${r.feature}   ${String(r.attempt).padEnd(7)} ${r.outcome.padEnd(8)} ${(r.verdict ?? '-').padEnd(8)} ${String(r.turns).padStart(5)}  $${r.costUsd.toFixed(2).padStart(5)} ${String(r.minutes).padStart(4)}  ${(r.harness ?? '?').padEnd(7)}  ${r.pr ?? ''}`,
     )
   }
   const total = rows.reduce((s, r) => s + r.costUsd, 0)
@@ -602,9 +668,9 @@ function report() {
 
 const promptFile = (name: string) => readFileSync(path.join(PACKAGE_ROOT, 'prompts', name), 'utf8')
 
-function projectNotes(): string {
-  const notesFile = config.prompts.generatorNotes
-  const notes = notesFile ? readFileSync(path.join(ROOT, notesFile), 'utf8').trim() : ''
+function projectNotes(p: Project): string {
+  const notesFile = p.config.prompts.generatorNotes
+  const notes = notesFile ? readFileSync(p.resolve(notesFile), 'utf8').trim() : ''
   return notes ? `\nProject notes (\`${notesFile}\`):\n\n${notes}\n` : ''
 }
 
@@ -635,10 +701,11 @@ function sessionArgs(prompt: string, plugin: string): string[] {
   ]
 }
 
-function generatorTemplate(): string {
+/** The generator prompt of `p` with the per-attempt placeholders left in (also `harness selftest`). */
+export function generatorTemplate(p: Project = project): string {
   return render(promptFile('generator.md'), {
-    PROJECT_NAME: config.project.name,
-    PROJECT_NOTES: projectNotes(),
+    PROJECT_NAME: p.config.project.name,
+    PROJECT_NOTES: projectNotes(p),
     FEATURE_ID: '{{FEATURE_ID}}',
     FEATURE_TITLE: '{{FEATURE_TITLE}}',
     ATTEMPT: '{{ATTEMPT}}',
@@ -1320,7 +1387,7 @@ async function shepherdPr(run: PrRun): Promise<'merged' | 'blocked' | 'aborted'>
 
     const prompt = render(promptFile('ci-fixer.md'), {
       PROJECT_NAME: config.project.name,
-      PROJECT_NOTES: projectNotes(),
+      PROJECT_NOTES: projectNotes(project),
       FEATURE_ID: id,
       FEATURE_TITLE: feature.title,
       PR: pr,
@@ -1546,6 +1613,644 @@ function giveUp(
 }
 
 // ---------------------------------------------------------------------------------------
+// Harness update (src/update.ts)
+// ---------------------------------------------------------------------------------------
+
+/** What a loop run keeps across a restart onto a new harness version (`HARNESS_LOOP_CARRY`). */
+export interface Carry {
+  attempted: string[]
+  intakeIssues: number[]
+  retros: number
+  consecutiveFailures: number
+  /** Releases this run already updated to, tried to, or reported; each is handled once. */
+  updates: string[]
+  /** Set when an update merged: the first feature on `version` decides whether it stays. */
+  probation?: Probation
+  /** Set after a probation rollback: `feature` runs again on `from` to test `suspect`. */
+  retry?: Retry
+}
+
+export interface Probation {
+  version: string
+  from: string
+  /** Set when this project tests the release as its canary (src/rollout.ts). */
+  canary?: CanaryClaim
+}
+
+export interface Retry {
+  feature: string
+  suspect: string
+  from: string
+  evidence: string[]
+  canary?: CanaryClaim
+  /** The retro issue the feature came from; its feature exists only on the set-aside branch. */
+  intake?: IntakeItem
+}
+
+export const CARRY_ENV = 'HARNESS_LOOP_CARRY'
+
+/**
+ * What the first feature after an update says about the release: `passed` keeps it, `suspect`
+ * rolls back and re-tests, `pending` (an aborted run) decides nothing.
+ */
+export function probationResult(
+  outcome: IterationOutcome | 'error',
+): 'passed' | 'suspect' | 'pending' {
+  if (outcome === 'done') return 'passed'
+  if (outcome === 'aborted') return 'pending'
+  return 'suspect'
+}
+
+/** Outcomes that settle a probation; a restarted driver that wrote none of them did not finish one. */
+const PROBATION_SETTLED = new Set([
+  'probation-ok',
+  'rolled-back',
+  'quarantined',
+  'probation-cleared',
+])
+
+/**
+ * After a restarted driver exits: `rollback` when it ran a release on probation and exited with an
+ * error before settling it (it crashed on the new version), else `exit` with its code.
+ */
+export function supervise(s: {
+  code: number
+  aborted: boolean
+  probation?: { version: string; from: string }
+  records: { outcome: string }[]
+}): 'exit' | 'rollback' {
+  if (!s.probation || s.aborted || s.code === 0) return 'exit'
+  return s.records.some((r) => PROBATION_SETTLED.has(r.outcome)) ? 'exit' : 'rollback'
+}
+
+/** The feature to re-test after a probation rollback, if it is still there. */
+export function retryFeature(retry: Retry | undefined, list: { features: Feature[] }) {
+  if (!retry) return undefined
+  return retry.intake?.feature ?? list.features.find((f) => f.id === retry.feature)
+}
+
+/** Where a probation run's branch is kept for inspection, out of the feature queue. */
+export const asideBranch = (version: string, id: string) => `harness/probation-v${version}-${id}`
+
+export function readCarry(raw: string | undefined): Carry {
+  const empty: Carry = {
+    attempted: [],
+    intakeIssues: [],
+    retros: 0,
+    consecutiveFailures: 0,
+    updates: [],
+  }
+  if (!raw) return empty
+  try {
+    return { ...empty, ...(JSON.parse(raw) as Partial<Carry>) }
+  } catch {
+    return empty
+  }
+}
+
+function readJson(file: string): unknown {
+  return existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : undefined
+}
+
+const pinSnapshot = (dir: string): PinSnapshot => ({
+  packageJson: readJson(path.join(dir, 'package.json')),
+  settings: readJson(path.join(dir, '.claude', 'settings.json')),
+})
+
+/** `harness/update-vX.Y.Z` moving forward, `harness/rollback-vX.Y.Z` moving back. */
+export const pinBranch = (version: string, forward: boolean) =>
+  `harness/${forward ? 'update' : 'rollback'}-v${version}`
+
+/** Does the remote default branch already pin `version` (an update PR merged by a human)? */
+function defaultBranchPins(version: string): boolean {
+  if (sh('git', ['fetch', remote(), defaultBranch()], { quiet: true }).code !== 0) return false
+  const r = sh('git', ['show', `${remote()}/${defaultBranch()}:package.json`], { quiet: true })
+  if (r.code !== 0) return false
+  const pkg = JSON.parse(r.out) as Record<string, Record<string, string> | undefined>
+  return (pkg.devDependencies?.[PACKAGE] ?? pkg.dependencies?.[PACKAGE]) === pinSpec(version)
+}
+
+/** The default branch has the new pins: pull it and install, so a restart runs that version. */
+function takeUpdate(installed: string, target: string, pr?: string): true {
+  must('git', ['pull', '--ff-only', remote(), defaultBranch()], 'git pull after the harness update')
+  const install = sh('pnpm', ['install', '--frozen-lockfile'], { quiet: true })
+  if (install.code !== 0)
+    throw new Error(`pnpm install after the harness update failed: ${install.err}`)
+  record({
+    ts: new Date().toISOString(),
+    feature: 'harness',
+    attempt: 1,
+    outcome: compareVersions(target, installed) > 0 ? 'updated' : 'rolled-back',
+    pr,
+    costUsd: 0,
+    turns: 0,
+    minutes: 0,
+    trace: '',
+    note: `v${installed} → v${target}`,
+  })
+  return true
+}
+
+/**
+ * The selftest checks that pass with the installed version (run in ROOT) and fail with the new
+ * one (run in the update worktree). A version without `selftest` counts as all-pass.
+ */
+function selftestRegressions(dir: string): Check[] {
+  const run = (cwd: string): Check[] | undefined => {
+    const r = sh(process.execPath, [installedBin(cwd), 'selftest', '--json'], { cwd, quiet: true })
+    try {
+      return JSON.parse(r.out) as Check[]
+    } catch {
+      return undefined
+    }
+  }
+  const before = run(ROOT) ?? []
+  const after = run(dir)
+  if (!after)
+    return [
+      { name: 'selftest runs', ok: false, detail: 'the new version printed no selftest JSON' },
+    ]
+  return regressions(before, after)
+}
+
+type PinResult = { state: 'merged' | 'waiting' | 'failed' | 'quarantined'; pr?: string }
+
+/**
+ * One PR that only moves the harness pins to `target`, from its own worktree, so a feature PR never
+ * carries it. Moving forward, the new version's selftest must not regress against the installed
+ * one, or the release is quarantined instead. Then doctor and `init.sh` with the L1 baseline run on
+ * the new pins. A diff that changes only the pins skips the merge gate (src/update.ts →
+ * notPinOnly) and auto-merges under the auto merge policy; the driver waits for it even with
+ * --no-wait, because only a merged change can be pulled. Failures are notified, never thrown.
+ */
+async function pinPr(
+  target: string,
+  installed: string,
+  opts: Options,
+  why: string,
+): Promise<PinResult> {
+  const forward = compareVersions(target, installed) > 0
+  const branch = pinBranch(target, forward)
+  const dir = path.join(worktreeRoot(project), branch.replace('/', '-'))
+  const auto = opts.autoMerge || config.merge === 'auto'
+  const subject = forward
+    ? `chore(harness): update to v${target}`
+    : `chore(harness): roll back to v${target}`
+  log(`=== harness ${forward ? 'update' : 'rollback'} v${installed} → v${target} (${why})`)
+  try {
+    sh('git', ['worktree', 'remove', '--force', dir], { quiet: true })
+    sh('git', ['branch', '-D', branch], { quiet: true })
+    mkdirSync(path.dirname(dir), { recursive: true })
+    must('git', ['worktree', 'add', '-b', branch, dir, defaultBranch()], 'git worktree add')
+    const before = pinSnapshot(dir)
+    applyUpdate(dir, target, log)
+    if (forward) {
+      const regressed = selftestRegressions(dir)
+      if (regressed.length > 0) {
+        for (const c of regressed) log(`  ✗ selftest ${c.name}: ${c.detail}`)
+        const filed = quarantine(project, {
+          version: target,
+          from: installed,
+          cause: `harness selftest regresses: ${regressed.map((c) => c.name).join(', ')}`,
+          evidence: regressed.map(
+            (c) => `\`${c.name}\` passes on v${installed}, fails on v${target}: ${c.detail}`,
+          ),
+        })
+        record({
+          ts: new Date().toISOString(),
+          feature: 'harness',
+          attempt: 1,
+          outcome: 'quarantined',
+          pr: filed.url,
+          costUsd: 0,
+          turns: 0,
+          minutes: 0,
+          trace: '',
+          note: `v${target}: selftest regressions (${filed.action})`,
+          harness: installed,
+        })
+        notify(
+          `harness v${target} quarantined: selftest regresses in ${config.project.name} (${filed.url}); the loop stays on v${installed}`,
+        )
+        return { state: 'quarantined', pr: filed.url }
+      }
+      log(`selftest of v${target}: no regression against v${installed}`)
+    }
+    log(`${config.project.init} with the L1 baseline on v${target}`)
+    const init = sh('bash', [config.project.init], { cwd: dir, quiet: true })
+    if (init.code !== 0)
+      throw new Error(
+        `${config.project.init} failed on v${target}:\n${`${init.out}\n${init.err}`.trim().slice(-2000)}`,
+      )
+    must('git', ['add', '-A'], 'git add', dir)
+    const changed = must('git', ['diff', '--cached', '--name-only'], 'git diff', dir)
+      .split('\n')
+      .filter(Boolean)
+    const hold = notPinOnly(changed, before, pinSnapshot(dir))
+    must(
+      'git',
+      [
+        'commit',
+        '-m',
+        subject,
+        '-m',
+        `Opened by the loop driver (update.auto) on v${installed}: ${why}.`,
+      ],
+      'git commit',
+      dir,
+    )
+    must('git', ['push', '-u', remote(), branch], 'git push', dir)
+    if (!ghAvailable()) {
+      notify(`harness ${branch} pushed; open and merge its PR by hand`)
+      return { state: 'waiting' }
+    }
+    const repo = rolloutRepo(config)
+    const body = [
+      `Moves the harness from v${installed} to v${target}: ${why}.`,
+      '',
+      forward
+        ? `Release notes: https://github.com/${repo}/releases/tag/v${target} · changes: https://github.com/${repo}/compare/v${installed}...v${target}`
+        : `Release notes of v${target}: https://github.com/${repo}/releases/tag/v${target}`,
+      '',
+      ...(hold.length > 0
+        ? [
+            '> **Waits for a human review** — more than the harness pin changed:',
+            ...hold.map((r) => `> - ${r}`),
+          ]
+        : [
+            `Changes only the harness pin; checked on v${target} with ${forward ? '`harness selftest` against v' + installed + ', ' : ''}\`harness doctor\` and \`${config.project.init}\` (L1 baseline). Opened by the loop driver (\`update.auto\`).`,
+          ]),
+    ].join('\n')
+    const bodyFile = path.join(ROOT, config.traceDir, `${branch.replace('/', '-')}-pr-body.md`)
+    mkdirSync(path.dirname(bodyFile), { recursive: true })
+    writeFileSync(bodyFile, body)
+    const created = sh(
+      'gh',
+      [
+        'pr',
+        'create',
+        '--base',
+        defaultBranch(),
+        '--head',
+        branch,
+        '--title',
+        subject,
+        '--body-file',
+        bodyFile,
+      ],
+      { cwd: dir, quiet: true },
+    )
+    if (created.code !== 0) throw new Error(`gh pr create failed: ${created.err}`)
+    const pr = created.out.split('\n').find((l) => l.startsWith('https://')) ?? created.out
+    log(`harness pin PR: ${pr}`)
+    if (hold.length > 0 || !auto) {
+      notify(
+        `harness ${forward ? 'update' : 'rollback'} to v${target} waits for a merge${hold.length > 0 ? ` (${hold.join('; ')})` : ''}; the loop stays on v${installed}: ${pr}`,
+      )
+      return { state: 'waiting', pr }
+    }
+    const armed = sh('gh', ['pr', 'merge', pr, '--auto', '--squash', '--delete-branch'], {
+      cwd: dir,
+      quiet: true,
+    })
+    if (armed.code !== 0) throw new Error(`gh pr merge --auto failed: ${armed.err}`)
+    const waited = await waitForMerge(pr, true, new Set())
+    if (waited.state === 'merged') return { state: 'merged', pr }
+    sh('gh', ['pr', 'merge', pr, '--disable-auto'], { quiet: true })
+    notify(
+      `harness ${forward ? 'update' : 'rollback'} to v${target}: CI ${waited.state === 'stalled' ? `reported nothing for ${CI_STALL_MIN} min` : 'failed'}; auto-merge disabled, the loop stays on v${installed}: ${pr}`,
+    )
+    return { state: 'failed', pr }
+  } catch (error) {
+    if (aborting) throw error
+    notify(
+      `harness ${forward ? 'update' : 'rollback'} to v${target} failed, the loop stays on v${installed}: ${error instanceof Error ? error.message : String(error)}`,
+    )
+    return { state: 'failed' }
+  } finally {
+    sh('git', ['worktree', 'remove', '--force', dir], { quiet: true })
+    sh('git', ['branch', '-D', branch], { quiet: true })
+  }
+}
+
+let ghWarned = false
+
+/**
+ * Before a feature starts, with `update.auto`: move the pins to the release pickTarget chooses
+ * (src/update.ts): the newest one that is old enough, not breaking and not quarantined, or another
+ * release when the installed one is quarantined. Returns true when the default branch now has the
+ * new pins and the driver must restart. Each release is handled once per loop run.
+ */
+async function maybeUpdate(opts: Options, carry: Carry): Promise<boolean> {
+  if (!config.update.auto || isHarnessRepo(ROOT)) return false
+  if (!ghAvailable()) {
+    if (!ghWarned)
+      log('harness update skipped: gh is not logged in (releases and quarantines are read with gh)')
+    ghWarned = true
+    return false
+  }
+  const installed = packageVersion()
+  const repo = rolloutRepo(config)
+  const me = projectRepo(project) ?? config.project.name
+  let target: Target
+  let rollouts: Map<string, RolloutState>
+  try {
+    rollouts = rolloutStates(listRollouts(repo, ROOT), Date.now())
+    target = pickTarget({
+      installed,
+      releases: listReleases(repo, ROOT),
+      quarantined: listQuarantined(repo, ROOT),
+      rollouts,
+      me,
+      canary: config.update.canary,
+      allowBreaking: config.update.allowBreaking,
+    })
+  } catch (error) {
+    log(`harness update check skipped: ${error instanceof Error ? error.message : String(error)}`)
+    return false
+  }
+  if (target.action === 'none') {
+    if (target.reason) log(`harness update: ${target.reason}`)
+    return false
+  }
+  const version = target.version
+  if (carry.updates.includes(version)) return false
+  if (target.action === 'notify') {
+    carry.updates.push(version)
+    notify(target.reason)
+    return false
+  }
+  const forward = compareVersions(version, installed) > 0
+  let canary: CanaryClaim | undefined
+  if (target.action === 'canary') {
+    if (opts.dryRun) {
+      log(
+        `would claim harness v${version} as canary (${target.why}) on its rollout issue, then update to it`,
+      )
+      carry.updates.push(version)
+      return false
+    }
+    try {
+      const issue = ensureRolloutIssue(repo, version, ROOT, rollouts.get(version)?.issue)
+      if (target.resume) {
+        canary = { repo, issue, commentId: target.resume, version, me }
+        log(`continuing as canary of harness v${version} (${target.why})`)
+      } else {
+        const claimed = await claim({ repo, issue, version, me }, config.update.canaryHours, ROOT)
+        if (!claimed.won) {
+          log(`harness v${version} was claimed first by ${claimed.holder ?? 'another project'}`)
+          return false
+        }
+        canary = claimed.claim
+        notify(
+          `${config.project.name} tests harness v${version} as canary (claim for ${config.update.canaryHours} h): https://github.com/${repo}/issues/${issue}`,
+        )
+      }
+    } catch (error) {
+      log(`harness canary claim skipped: ${error instanceof Error ? error.message : String(error)}`)
+      return false
+    }
+  }
+  /** The update did not reach the default branch: let the next loop test the release. */
+  const giveBack = (reason: string) => {
+    if (!canary) return
+    try {
+      releaseClaim(canary, reason, ROOT)
+    } catch (error) {
+      log(
+        `releasing the canary claim failed: ${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
+  }
+  const probation = forward ? { version, from: installed, canary } : undefined
+  if (!opts.dryRun && defaultBranchPins(version)) {
+    carry.updates.push(version)
+    log(`${defaultBranch()} already pins harness v${version}; pulling it`)
+    try {
+      takeUpdate(installed, version)
+      carry.probation = probation
+      return true
+    } catch (error) {
+      notify(
+        `harness update to v${version} failed, the loop stays on v${installed}: ${error instanceof Error ? error.message : String(error)}`,
+      )
+      giveBack('the pull after the update failed')
+      return false
+    }
+  }
+  const branch = pinBranch(version, forward)
+  if (sh('git', ['ls-remote', '--heads', remote(), `refs/heads/${branch}`], { quiet: true }).out) {
+    log(`harness update: ${branch} is still open`)
+    giveBack(`its update PR ${branch} is still open`)
+    return false
+  }
+  carry.updates.push(version)
+  if (opts.dryRun) {
+    log(`would move harness v${installed} → v${version} before the next feature (${target.why}):`)
+    log(
+      `  git worktree add -b ${branch} … ${defaultBranch()}; pnpm add ${PACKAGE}@${pinSpec(version)}, marketplace ref, harness doctor`,
+    )
+    if (forward)
+      log(
+        `  harness selftest of v${installed} and v${version}; a regression quarantines v${version}`,
+      )
+    log(
+      `  ${config.project.init} with the L1 baseline; commit, push, PR; ${opts.autoMerge || config.merge === 'auto' ? 'auto-merge, wait, pull, pnpm install, restart' : 'then wait for a human merge'}`,
+    )
+    return false
+  }
+  const result = await pinPr(version, installed, opts, target.why)
+  if (result.state === 'quarantined' && canary && result.pr) {
+    settleCanary(canary, (c) => markQuarantined(c, result.pr!, ROOT))
+    return false
+  }
+  if (result.state !== 'merged') {
+    giveBack(
+      result.state === 'waiting' ? 'its update PR waits for a human merge' : 'the update failed',
+    )
+    return false
+  }
+  try {
+    takeUpdate(installed, version, result.pr)
+    carry.probation = probation
+    return true
+  } catch (error) {
+    notify(
+      `harness pins moved to v${version} but the pull or install failed: ${error instanceof Error ? error.message : String(error)}`,
+    )
+    giveBack('the pull after the update failed')
+    return false
+  }
+}
+
+/** Runs one rollout step on the canary's claim; a GitHub failure is logged, never thrown. */
+function settleCanary(c: CanaryClaim | undefined, step: (c: CanaryClaim) => void) {
+  if (!c) return
+  try {
+    step(c)
+  } catch (error) {
+    log(`rollout issue update failed: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+let renewTimer: NodeJS.Timeout | undefined
+
+/**
+ * Keeps the canary's claim alive while its probation or re-test runs: renewed now and every 30
+ * minutes, so only a canary that stopped lets its claim lapse. `undefined` stops renewing.
+ */
+function keepClaim(c: CanaryClaim | undefined) {
+  if (renewTimer) clearInterval(renewTimer)
+  renewTimer = undefined
+  if (!c) return
+  const renew = () => settleCanary(c, (claim) => renewClaim(claim, config.update.canaryHours, ROOT))
+  renew()
+  renewTimer = setInterval(renew, 30 * 60_000)
+  renewTimer.unref()
+}
+
+/** Runs the loop again on the harness now installed in ROOT and waits for it. */
+function restart(carry: Carry): { code: number; signal: string | null; since: string } {
+  const bin = installedBin(ROOT)
+  const since = new Date().toISOString()
+  log(`restarting the driver on harness ${path.relative(ROOT, bin)}`)
+  const child = spawnSync(process.execPath, [bin, ...process.argv.slice(2)], {
+    cwd: process.cwd(),
+    stdio: 'inherit',
+    env: { ...process.env, [CARRY_ENV]: JSON.stringify(carry) },
+  })
+  return { code: child.status ?? 1, signal: child.signal, since }
+}
+
+/**
+ * Keeps a probation run's branch for inspection as asideBranch() and takes it out of the queue:
+ * the feature branch is deleted on the remote and locally with its worktree, so its attempts and
+ * any auto-block on it do not count against the feature.
+ */
+function setAside(id: string, version: string): string {
+  const branch = branchFor(id)
+  const aside = asideBranch(version, id)
+  const local = sh('git', ['rev-parse', '--verify', '--quiet', branch], { quiet: true }).code === 0
+  if (local) {
+    const pushed = sh(
+      'git',
+      ['push', '--force', remote(), `refs/heads/${branch}:refs/heads/${aside}`],
+      {
+        quiet: true,
+      },
+    )
+    log(
+      pushed.code === 0
+        ? `kept ${id}'s probation run as ${aside}`
+        : `could not push ${aside}: ${pushed.err}`,
+    )
+  }
+  sh('git', ['push', remote(), '--delete', branch], { quiet: true })
+  removeWorktree(id)
+  return aside
+}
+
+/** The run records of `id` on `version`, as evidence lines. */
+function runEvidence(id: string, version: string, since?: string): string[] {
+  return readRunRecords()
+    .filter((r) => r.feature === id && r.harness === version && (!since || r.ts >= since))
+    .map(
+      (r) =>
+        `${id} attempt ${r.attempt} on v${version}: ${r.outcome}${r.verdict ? ` (${r.verdict})` : ''}${r.note ? ` — ${r.note.slice(0, 200)}` : ''}${r.trace ? ` · trace \`${path.relative(ROOT, r.trace)}\`` : ''}`,
+    )
+}
+
+/** Quarantines `version` and returns the issue URL; a failure to file is notified, never thrown. */
+function quarantineRelease(r: Parameters<typeof quarantine>[1]): string | undefined {
+  try {
+    const filed = quarantine(project, r)
+    record({
+      ts: new Date().toISOString(),
+      feature: 'harness',
+      attempt: 1,
+      outcome: 'quarantined',
+      pr: filed.url,
+      costUsd: 0,
+      turns: 0,
+      minutes: 0,
+      trace: '',
+      note: `v${r.version}: ${r.cause} (${filed.action})`,
+    })
+    notify(`harness v${r.version} quarantined: ${r.cause} — ${filed.url}`)
+    return filed.url
+  } catch (error) {
+    notify(
+      `harness v${r.version} should be quarantined (${r.cause}) but filing failed: ${error instanceof Error ? error.message : String(error)}`,
+    )
+    return undefined
+  }
+}
+
+/** After a quarantine, or when the release is not to blame, the canary's claim ends. */
+function closeCanary(
+  c: CanaryClaim | undefined,
+  quarantineUrl: string | undefined,
+  reason: string,
+) {
+  settleCanary(c, (claim) =>
+    quarantineUrl ? markQuarantined(claim, quarantineUrl, ROOT) : releaseClaim(claim, reason, ROOT),
+  )
+}
+
+/**
+ * The restarted driver exited with an error before it settled its probation: the new version
+ * crashed. This driver (the previous version) rolls back, then checks that its own preflight
+ * passes; only then is the new version to blame and quarantined. False stops the loop.
+ */
+async function rollbackCrashed(
+  opts: Options,
+  probation: Probation,
+  child: { code: number; since: string },
+): Promise<boolean> {
+  const { version, from } = probation
+  notify(
+    `the driver on harness v${version} exited with code ${child.code} before its first feature settled; rolling back to v${from}`,
+  )
+  const moved = await pinPr(
+    from,
+    version,
+    opts,
+    `the driver on v${version} exited with code ${child.code}`,
+  )
+  if (moved.state !== 'merged') {
+    notify(`the rollback to v${from} did not merge; stopping the loop`)
+    return false
+  }
+  takeUpdate(version, from, moved.pr)
+  try {
+    preflight(opts)
+  } catch (error) {
+    notify(
+      `preflight fails on v${from} too (${error instanceof Error ? error.message : String(error)}); v${version} is not quarantined and the loop stops`,
+    )
+    closeCanary(
+      probation.canary,
+      undefined,
+      `its driver exited and preflight fails on v${from} too`,
+    )
+    return false
+  }
+  const url = quarantineRelease({
+    version,
+    from,
+    cause: `the loop driver exits with code ${child.code}`,
+    evidence: [
+      `the loop driver on v${version} exited with code ${child.code} before its first feature settled; the preflight of v${from} passes in the same checkout`,
+      ...readRunRecords()
+        .filter((r) => r.ts >= child.since && r.harness === version)
+        .map((r) => `${r.feature}: ${r.outcome}${r.note ? ` — ${r.note.slice(0, 200)}` : ''}`),
+    ],
+  })
+  closeCanary(probation.canary, url, 'quarantine filing failed')
+  return true
+}
+
+// ---------------------------------------------------------------------------------------
 // Preflight and main loop
 // ---------------------------------------------------------------------------------------
 
@@ -1646,11 +2351,15 @@ export async function loopCommand(argv: string[]): Promise<number> {
     currentChild?.kill('SIGINT')
   })
 
+  const carried = process.env[CARRY_ENV]
+  delete process.env[CARRY_ENV]
+  if (carried) log(`restarted on harness v${packageVersion()}`)
   preflight(opts)
-  let consecutiveFailures = 0
-  let retros = 0
-  const attempted = new Set<string>()
-  const intakeIssues = new Set<number>()
+  const carry = readCarry(carried)
+  let consecutiveFailures = carry.consecutiveFailures
+  let retros = carry.retros
+  const attempted = new Set(carry.attempted)
+  const intakeIssues = new Set(carry.intakeIssues)
 
   /** A retro when one is due; failures are logged, never fatal to the loop. */
   const retroIfDue = (trigger: 'every' | 'queue-empty'): boolean => {
@@ -1671,42 +2380,82 @@ export async function loopCommand(argv: string[]): Promise<number> {
     return true
   }
 
+  keepClaim(carry.probation?.canary ?? carry.retry?.canary)
+  const snapshot = (): Carry => ({
+    ...carry,
+    attempted: [...attempted],
+    intakeIssues: [...intakeIssues],
+    retros,
+    consecutiveFailures,
+  })
+
   for (;;) {
+    // No update while a re-test runs: it must run on the version it rolled back to.
+    if (!carry.retry && (await maybeUpdate(opts, carry))) {
+      const probation = carry.probation
+      const child = restart(snapshot())
+      await new Promise((resolve) => setImmediate(resolve)) // let a pending SIGINT handler run
+      const verdict = supervise({
+        code: child.code,
+        aborted: aborting || child.signal !== null,
+        probation,
+        records: readRunRecords().filter((r) => r.ts >= child.since),
+      })
+      if (verdict === 'exit' || !probation) return child.code
+      carry.probation = undefined
+      if (!(await rollbackCrashed(opts, probation, child))) break
+      continue
+    }
+    if (aborting) break
     const list = readFeatureList(project.resolve(config.project.featureList), config.features)
     const inFlight = inFlightIds()
     let feature: Feature | undefined
     let intake: IntakeItem | undefined
-    if (!opts.feature && config.retro.intake) {
-      try {
-        const ids = [...list.features.map((f) => f.id), ...inFlight]
-        const priority = Math.max(0, ...list.features.map((f) => f.priority))
-        intake = nextIntake(project, ids, priority)
-        // Dry run: nothing is queued, so the same issue would come back every iteration.
-        if (intake && intakeIssues.has(intake.issue)) intake = undefined
-      } catch (error) {
-        log(`retro intake skipped: ${error instanceof Error ? error.message : String(error)}`)
+    const retry = carry.retry
+    if (retry) {
+      feature = retryFeature(retry, list)
+      intake = retry.intake
+      if (!feature) {
+        log(`re-test of ${retry.feature} skipped: it is no longer in the feature list`)
+        carry.retry = undefined
+        continue
       }
-    }
-    if (intake) {
-      feature = intake.feature
-      intakeIssues.add(intake.issue)
-      log(`retro intake: ${intake.url} → ${feature.id} — ${feature.title}`)
-      if (!opts.dryRun) markQueued(project, intake, branchFor(feature.id))
-    } else if (opts.feature) {
-      feature = list.features.find((f) => f.id === opts.feature)
-      if (!feature) throw new Error(`unknown feature ${opts.feature}`)
-      if (!isReady(feature, list)) {
-        const byId = new Map(list.features.map((f) => [f.id, f]))
-        const waiting = feature.depends_on.filter((d) => byId.get(d)?.status !== 'passing')
-        throw new Error(
-          `${opts.feature} is not ready: status ${feature.status}` +
-            (waiting.length ? `, waiting on ${waiting.join(', ')}` : ''),
-        )
-      }
-      if (isHumanOnly(feature))
-        throw new Error(`${opts.feature} has manual verification steps; run it interactively`)
+      log(
+        `=== re-test: ${feature.id} on harness v${packageVersion()} (it did not pass on v${retry.suspect})`,
+      )
     } else {
-      feature = nextReadyFeature(list, { exclude: [...inFlight, ...attempted] })
+      if (!opts.feature && config.retro.intake) {
+        try {
+          const ids = [...list.features.map((f) => f.id), ...inFlight]
+          const priority = Math.max(0, ...list.features.map((f) => f.priority))
+          intake = nextIntake(project, ids, priority)
+          // Dry run: nothing is queued, so the same issue would come back every iteration.
+          if (intake && intakeIssues.has(intake.issue)) intake = undefined
+        } catch (error) {
+          log(`retro intake skipped: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
+      if (intake) {
+        feature = intake.feature
+        intakeIssues.add(intake.issue)
+        log(`retro intake: ${intake.url} → ${feature.id} — ${feature.title}`)
+        if (!opts.dryRun) markQueued(project, intake, branchFor(feature.id))
+      } else if (opts.feature) {
+        feature = list.features.find((f) => f.id === opts.feature)
+        if (!feature) throw new Error(`unknown feature ${opts.feature}`)
+        if (!isReady(feature, list)) {
+          const byId = new Map(list.features.map((f) => [f.id, f]))
+          const waiting = feature.depends_on.filter((d) => byId.get(d)?.status !== 'passing')
+          throw new Error(
+            `${opts.feature} is not ready: status ${feature.status}` +
+              (waiting.length ? `, waiting on ${waiting.join(', ')}` : ''),
+          )
+        }
+        if (isHumanOnly(feature))
+          throw new Error(`${opts.feature} has manual verification steps; run it interactively`)
+      } else {
+        feature = nextReadyFeature(list, { exclude: [...inFlight, ...attempted] })
+      }
     }
     if (!feature) {
       // A retro may file issues the intake picks up; look again before stopping.
@@ -1715,8 +2464,120 @@ export async function loopCommand(argv: string[]): Promise<number> {
       break
     }
     attempted.add(feature.id)
-    const outcome = await runFeature(feature, opts, intake)
+    const probation = carry.probation
+    const started = new Date().toISOString()
+    let outcome: IterationOutcome | 'error'
+    let failure: string | undefined
+    try {
+      outcome = await runFeature(feature, opts, intake)
+    } catch (error) {
+      if (!probation && !retry) throw error
+      outcome = 'error'
+      failure = error instanceof Error ? error.message : String(error)
+      log(`${feature.id}: driver error — ${failure}`)
+    }
     if (outcome === 'aborted') break
+
+    if (probation) {
+      const result = probationResult(outcome)
+      if (result === 'passed') {
+        carry.probation = undefined
+        keepClaim(undefined)
+        log(`harness v${probation.version} passed its probation on ${feature.id}`)
+        settleCanary(probation.canary, (c) =>
+          markVerified(
+            c,
+            [
+              `${feature.id} — ${feature.title}: done on v${probation.version}`,
+              ...runEvidence(feature.id, probation.version, started),
+            ],
+            ROOT,
+          ),
+        )
+        record({
+          ts: new Date().toISOString(),
+          feature: 'harness',
+          attempt: 1,
+          outcome: 'probation-ok',
+          costUsd: 0,
+          turns: 0,
+          minutes: 0,
+          trace: '',
+          note: `${feature.id} passed on v${probation.version}${probation.canary ? '; verified as canary' : ''}`,
+        })
+      } else if (result === 'suspect') {
+        carry.probation = undefined
+        const evidence = [
+          ...runEvidence(feature.id, probation.version, started),
+          ...(failure ? [`${feature.id} on v${probation.version}: driver error — ${failure}`] : []),
+        ]
+        evidence.push(`the run is kept as branch \`${setAside(feature.id, probation.version)}\``)
+        notify(
+          `${feature.id} ${outcome} on harness v${probation.version}, its first feature after the update; rolling back to v${probation.from} to re-test it there`,
+        )
+        const moved = await pinPr(
+          probation.from,
+          probation.version,
+          opts,
+          `v${probation.version} failed its probation on ${feature.id}`,
+        )
+        if (moved.state !== 'merged') {
+          notify(
+            `the rollback to v${probation.from} did not merge; stopping the loop so nothing more runs on v${probation.version}`,
+          )
+          break
+        }
+        takeUpdate(probation.version, probation.from, moved.pr)
+        attempted.delete(feature.id)
+        carry.retry = {
+          feature: feature.id,
+          suspect: probation.version,
+          from: probation.from,
+          evidence,
+          intake,
+          canary: probation.canary,
+        }
+        // The restart blocks this process's timer; the restarted driver renews from the carry.
+        keepClaim(undefined)
+        settleCanary(probation.canary, (c) => renewClaim(c, config.update.canaryHours, ROOT))
+        return restart(snapshot()).code
+      }
+    }
+    if (retry) {
+      carry.retry = undefined
+      const evidence = [...retry.evidence, ...runEvidence(feature.id, packageVersion(), started)]
+      keepClaim(undefined)
+      if (outcome === 'done') {
+        const url = quarantineRelease({
+          version: retry.suspect,
+          from: retry.from,
+          cause: `${feature.id} did not pass on v${retry.suspect} and passed on v${retry.from}`,
+          evidence: [...evidence, `${feature.id} on v${retry.from}: done`],
+        })
+        closeCanary(retry.canary, url, 'quarantine filing failed')
+      } else {
+        closeCanary(
+          retry.canary,
+          undefined,
+          `${feature.id} did not pass on v${retry.from} either, so the test was inconclusive`,
+        )
+        record({
+          ts: new Date().toISOString(),
+          feature: 'harness',
+          attempt: 1,
+          outcome: 'probation-cleared',
+          costUsd: 0,
+          turns: 0,
+          minutes: 0,
+          trace: '',
+          note: `${feature.id} did not pass on v${retry.from} either; v${retry.suspect} is not to blame`,
+        })
+        notify(
+          `${feature.id} did not pass on v${retry.from} either, so harness v${retry.suspect} is not to blame; a later loop run may take it again`,
+        )
+      }
+      if (failure) throw new Error(failure)
+    }
     if (!opts.dryRun) countFeatureRun(project)
     retroIfDue('every')
     consecutiveFailures = outcome === 'done' ? 0 : consecutiveFailures + 1

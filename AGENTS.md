@@ -39,8 +39,12 @@ directories and git repositories (`tests/`). A behaviour change without a test i
 - MUST run `pnpm schema` after changing `src/config.ts` and commit the regenerated
   `schema/harness.config.schema.json`. why: projects validate their config against it, and a test
   fails while it is stale.
-- MUST NOT bump `version`, edit `CHANGELOG.md` or tag. why: a human cuts releases, and only a
-  release reaches the projects (docs/developing.md → Releasing).
+- MUST NOT bump `version`, edit `CHANGELOG.md` or tag. why: the release workflow does that after
+  the merge, from the commit subjects (docs/developing.md → Releasing).
+- MUST mark a breaking change (a config key removed or renamed, a changed CLI flag) with `!` in the
+  commit subject (`feat(F-012)!: …`). why: it decides the version bump, and projects with
+  `update.auto` take only non-breaking releases on their own. Config schema breaks are detected
+  anyway; feature-list and CLI changes are not.
 - MUST NOT start `harness loop` or `harness retro`, or call `claude` or `gh`. why: they start
   sessions, push and file issues; the driver does that.
 - MUST keep changes backward compatible for pinned projects: a new config key has a default that

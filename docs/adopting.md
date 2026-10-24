@@ -43,7 +43,9 @@ Both end in the same layout. `X.Y.Z` below is the release you install; both pins
    "harness:clean-state": "harness clean-state",
    "harness:loop": "harness loop",
    "harness:report": "harness report",
-   "harness:doctor": "harness doctor"
+   "harness:doctor": "harness doctor",
+   "harness:update": "harness update",
+   "harness:selftest": "harness selftest"
    ```
 
    lint-staged: `'feature_list.json': ['harness check']`.
@@ -179,6 +181,19 @@ Run these in order. All must pass.
    differ from the local layers should have a local twin in L1 or in the clock-out. Example: CI builds
    with `SKIP_ENV_VALIDATION=1` and placeholder env, so add a `build:ci` script that runs the same
    build with the same env. Metsävahti F-048 passed L1–L3 locally and failed exactly that build in CI.
+6. **Optional: keep the harness current.** With `"update": { "auto": true }` in
+   `harness.config.json`, the loop moves to new harness releases before it starts the next
+   feature. It opens a `harness/update-vX.Y.Z` PR that changes only the package pin and the plugin
+   marketplace ref, auto-merges it under `merge: "auto"` (or `--auto-merge`) and restarts itself on
+   the new version ([how-it-works.md](how-it-works.md#4-operating-the-loop)).
+   - **Canary:** the first project loop that starts a feature after a release claims it and tests
+     it. The others wait until it's verified, and skip any release that was quarantined. A project
+     that should never be first sets `"canary": false`.
+   - **Trust:** such a PR skips this project's merge gate. Before the PR opens, the new version's
+     `harness selftest` must not regress against the installed one. Changes to the guard, hooks,
+     prompts and loop wait for a human in the harness repository.
+   - **Breaking releases** still need `pnpm harness:update --to X.Y.Z` by hand, or
+     `update.allowBreaking`.
 
 ## 5. Prompt for an agent doing the adoption
 

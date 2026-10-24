@@ -1,0 +1,80 @@
+name: Release
+
+# After CI passes on main: release the commits since the last tag when they change a shipped path
+# (scripts/release.ts, docs/developing.md → Releasing). main is protected, so the push uses
+# RELEASE_TOKEN, a token that may bypass the protection; GITHUB_TOKEN pushes would be rejected.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          fetch-tags: true
+          token: ${{ secrets.RELEASE_TOKEN }}
+      - name: Skip unless main is still the commit CI passed on
+        id: current
+        run: |
+          if [ "$(git rev-parse HEAD)" = "${{ github.event.workflow_run.head_sha }}" ]; then
+            echo "current=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "main moved on; the run for the newer commit releases these commits too"
+          fi
+      - uses: pnpm/action-setup@v4
+        if: steps.current.outputs.current == 'true'
+      - uses: actions/setup-node@v4
+        if: steps.current.outputs.current == 'true'
+        with:
+          node-version: 22
+          cache: pnpm
+      - if: steps.current.outputs.current == 'true'
+        run: pnpm install --frozen-lockfile
+      - name: Commit and tag the release
+        id: release
+        if: steps.current.outputs.current == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          pnpm exec tsx scripts/release.ts --notes "$RUNNER_TEMP/notes.md"
+      - name: Push and publish
+        if: steps.release.outputs.version != ''
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          git push --atomic origin HEAD:main "$VERSION"
+          gh release create "$VERSION" --title "$VERSION" --notes-file "$RUNNER_TEMP/notes.md"
+      - name: Open the rollout issue
+        if: steps.release.outputs.version != ''
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          VERSION: ${{ steps.release.outputs.version }}
+        # The first project loop with update.canary claims the release here and tests it; the
+        # others take it once it is verified (src/rollout.ts, docs/how-it-works.md → Rollout safety).
+        run: |
+          gh label create harness-rollout --color FBCA04 --description "The canary rollout of a harness release" --force
+          {
+            echo "The canary rollout of [$VERSION](https://github.com/$GITHUB_REPOSITORY/releases/tag/$VERSION)."
+            echo
+            echo "The first project loop with \`update.canary\` that starts a feature claims this release in a comment and tests it on probation. It is verified when that feature passes; other projects take only verified releases. A claim lapses after \`update.canaryHours\` without renewal."
+            echo
+            cat "$RUNNER_TEMP/notes.md"
+            echo
+            echo "<!-- harness-rollout $VERSION -->"
+          } > "$RUNNER_TEMP/rollout.md"
+          gh issue create --title "rollout $VERSION" --label harness-rollout --body-file "$RUNNER_TEMP/rollout.md"

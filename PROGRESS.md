@@ -11,20 +11,81 @@ this file to change on every branch; keep that heading text exactly.
 - Standard verification path: L1 `pnpm check` (typecheck, Prettier, `harness check`, Vitest). Per
   feature: `pnpm harness:verify F-NNN`.
 - The repository runs its own loop: features come from `harness-retro` issues filed by project
-  retros (docs/self-improvement.md). Releases stay manual (docs/developing.md → Releasing).
-- Last verified: F-003 on this commit, `pnpm check` green on 2026-10-24.
-- Highest-priority unfinished feature: none (F-001…F-003 passing).
+  retros (docs/self-improvement.md). Merges that change a shipped path are released by
+  `.github/workflows/release.yml` (docs/developing.md → Releasing); it needs the `RELEASE_TOKEN` secret.
+- Last verified: F-009 on this branch, `pnpm check` green on 2026-10-24.
+- Highest-priority unfinished feature: none (F-000…F-009 passing).
 - Current blocker: none.
 
 ## Next Steps
 
-1. Review and merge this branch (stacked on `feat/retro`, PR #3); it changes the guard, hooks and
-   prompts, so it waits for a human.
-2. Cut a release so the projects pick up F-001…F-003; until then their `generator-notes.md` carry
-   the no-self-evaluation rule.
+1. Create the `RELEASE_TOKEN` secret and its bypass of the main protection (docs/developing.md →
+   Releasing), then review and merge `feat/auto-release-update`. It changes the loop, the config and
+   a workflow, so it waits for a human. The merge should release v0.3.1 on its own; check the
+   Actions run.
+2. Move the projects to that release once (`pnpm harness:update`, then `pnpm check` and a commit).
+   Add Issues: read and write to `RELEASE_TOKEN`. Turn on `"update": { "auto": true }` in two
+   projects with `merge: "auto"`, then run the drill on the next release. The first loop claims it on
+   `rollout vX`, the other logs "being tested by …", and the release is verified after probation and
+   taken by the other. A canary loop stopped mid-test lets its claim lapse after 4 h. A quarantine
+   issue opened by hand makes the projects roll back.
 3. Build open `harness-retro` issues as they arrive (`pnpm harness:loop`, intake picks them up).
 
 ## Session Log
+
+### Session 003 — 2026-10-24 (automatic releases, project updates, rollout safety)
+
+- Goal: release every merge that changes the package (F-004), and let project loops move to the
+  newest release before each feature (F-005). Then make that rollout safe enough to run unattended
+  across projects (F-006…F-008). All were requested by hand.
+- F-004: `scripts/release.ts` (not `src/`: repository tooling, not shipped) bumps the patch number,
+  or the minor number for a `!`/`BREAKING CHANGE` commit while 0.x; it releases nothing when no
+  `package.json` `files` path changed. `release.yml` runs it after CI passes on a push to main and
+  pushes with `RELEASE_TOKEN`, because main is protected. Verification: `pnpm harness:verify F-004`.
+- F-005: `update.auto` (off by default). Before each feature the driver compares the newest `v*`
+  tag (`git ls-remote`) with the installed package. It opens a `harness/update-vX.Y.Z` PR from its
+  own worktree (pins only, new doctor plus `init.sh` with L1), auto-merges it under the auto policy,
+  pulls, reinstalls and re-execs itself with `HARNESS_LOOP_CARRY` (attempted features, retro and
+  failure counts). `harness update [--to] [--check]` does the same by hand. Breaking releases are
+  only reported unless `update.allowBreaking`. The plan had the update inside feature PRs as an
+  alternative; it was rejected because `.claude/settings.json` is in reviewPaths, so every feature
+  PR would wait for a human. Verification: `pnpm harness:verify F-005`; `harness update --check`
+  run against personal-finances (read-only) found v0.3.0 as newest.
+- F-006 (rollout safety, part 1 of 3): `harness selftest` runs the installed harness against a
+  project. The guard must block its core cases and allow the project's `allowedTools` and
+  verification commands, the hooks must exit cleanly, and doctor must pass. It's part of `pnpm check`
+  here. All three projects passed it read-only. The release script now reads breaking changes from
+  the config schema diff, because loop PR titles never carry `!`. Run records carry the harness
+  version. Verification: `pnpm harness:verify F-006`.
+- F-007 (part 2 of 3): `pickTarget` took the newest release that was old enough
+  (`update.minAgeHours`, replaced by F-009), not breaking and not quarantined. Releases and
+  `harness-quarantine` issues are read with `gh`; `git ls-remote` is only a fallback for
+  `harness update` without `gh`. A project on a quarantined release moves forward to the fix or back
+  (`harness/rollback-vX`). The update PR runs the old and the new selftest, and a regression
+  quarantines the release through `src/quarantine.ts`. That issue carries a feature block for this
+  repo's intake, with one fingerprint per version. Verification: `pnpm harness:verify F-007`.
+- F-008 (part 3 of 3): the first feature after an update runs on probation. If it isn't `done`, the
+  run is set aside as `harness/probation-vX-F-NNN` (its attempts don't count), the pins roll back
+  through `pinPr`, and the driver restarts and re-runs the feature (`carry.retry`). Passing on the
+  old version quarantines the release; failing again clears it. The parent driver supervises the
+  restarted one. A non-zero exit with no settled probation means a rollback, then the old preflight
+  as an A/B check, then quarantine. Verification: `pnpm harness:verify F-008`.
+- F-009: the fixed waiting time (`update.minAgeHours`, never released) is replaced by a canary
+  rollout. The release workflow opens `rollout vX.Y.Z`. The first loop with `update.canary` claims
+  it in a comment (earliest live claim wins), renews the claim every 30 min while on probation, and
+  marks the release verified when the probation passes. Others take only verified releases. A claim
+  lapses after `update.canaryHours` (4; the "quarantine time" in the request). A failed update or an
+  inconclusive re-test releases it; a quarantine closes the issue. `RELEASE_TOKEN` now also needs
+  Issues: read and write. Verification: `pnpm harness:verify F-009`.
+- Bootstrapping: rollback and re-test run in the version a project rolls back to, so they are
+  complete only from the release after the one that ships F-008. Until then the staged rollout and
+  the selftest (F-007) are the guard.
+- `src/update.ts` and `scripts/release.ts` were added to this repository's reviewPaths: one decides
+  which update PRs skip a project's merge gate, the other runs with a token that can push to main.
+- Known risk: neither the release workflow nor a real update, rollback or quarantine has run yet;
+  only their decision logic is unit-tested. They need
+  the `RELEASE_TOKEN` secret, a merge, and a project loop with `update.auto` on. The changelog is
+  now a list of commit subjects instead of curated prose.
 
 ### Session 002 — 2026-10-24 (fixes from the first overnight loops)
 

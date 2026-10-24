@@ -405,7 +405,7 @@ export interface IssueFeature {
   safety: boolean
 }
 
-const MARKER = 'harness-retro fingerprint:'
+export const MARKER = 'harness-retro fingerprint:'
 
 export function issueBody(
   finding: Finding,
@@ -502,7 +502,7 @@ export function projectRepo(project: Project): string | undefined {
   return r.code === 0 ? repoSlug(r.out) : undefined
 }
 
-interface Issue {
+export interface Issue {
   number: number
   title: string
   state: 'OPEN' | 'CLOSED'
@@ -512,7 +512,12 @@ interface Issue {
   labels: { name: string }[]
 }
 
-function listIssues(repo: string, label: string, state: 'open' | 'all', cwd: string): Issue[] {
+export function listIssues(
+  repo: string,
+  label: string,
+  state: 'open' | 'all',
+  cwd: string,
+): Issue[] {
   const r = sh(
     'gh',
     [
@@ -535,7 +540,7 @@ function listIssues(repo: string, label: string, state: 'open' | 'all', cwd: str
   return JSON.parse(r.out || '[]') as Issue[]
 }
 
-function ensureLabel(repo: string, name: string, description: string, cwd: string) {
+export function ensureLabel(repo: string, name: string, description: string, cwd: string) {
   sh(
     'gh',
     [

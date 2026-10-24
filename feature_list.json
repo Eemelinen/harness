@@ -67,6 +67,84 @@
       "evidence": ["2026-10-24 pnpm check → pass (working tree on a2a17d1)"],
       "attempts": 0,
       "notes": "idea-generator feat/F-006 and personal-finances feat/F-002 survived their merges (the first merge before delete_branch_on_merge was on), so every queue-empty notice said they were in flight."
+    },
+    {
+      "id": "F-004",
+      "priority": 4,
+      "area": "release",
+      "title": "Merges that change the package are released automatically",
+      "user_visible_behavior": "After CI passes on main, a release workflow bumps the version (patch by default; minor for a breaking change while 0.x), adds a CHANGELOG entry from the commit subjects, commits chore: release vX.Y.Z, tags it, pushes and creates the GitHub release. Merges that change no shipped path (docs, tests, state files) release nothing.",
+      "status": "passing",
+      "depends_on": [],
+      "verification": ["L1: pnpm check"],
+      "evidence": ["2026-10-24 pnpm check → pass (working tree on eb4150a)"],
+      "attempts": 0,
+      "notes": "Requested 2026-10-24: the self-improvement loop merges to main, but the changes reach projects only after a human cuts a release. main is protected, so the workflow pushes with a RELEASE_TOKEN secret that may bypass the protection."
+    },
+    {
+      "id": "F-005",
+      "priority": 5,
+      "area": "loop",
+      "title": "Project loops update to the newest harness release before each feature",
+      "user_visible_behavior": "With update.auto, before picking a feature the loop driver checks for a newer harness release; it opens a harness/update-vX.Y.Z PR that changes only the package pin and the plugin marketplace ref (checked with doctor and the L1 baseline), auto-merges it when the merge policy is auto, pulls, reinstalls and restarts itself on the new version. harness update [--check] does the same by hand. Off by default.",
+      "status": "passing",
+      "depends_on": ["F-004"],
+      "verification": ["L1: pnpm check"],
+      "evidence": ["2026-10-24 pnpm check → pass (working tree on da91493)"],
+      "attempts": 0,
+      "notes": "Requested 2026-10-24: updating every project by hand in the middle of a loop is the bottleneck once releases are automatic (F-004). Breaking releases need update.allowBreaking."
+    },
+    {
+      "id": "F-006",
+      "priority": 6,
+      "area": "release",
+      "title": "Selftest, schema-based breaking detection and the harness version on run records",
+      "user_visible_behavior": "harness selftest checks a project with the installed harness: config and feature list load, prompts render, the evaluator agent parses, the guard still blocks its core cases and still allows the project allowedTools and verification commands, the lifecycle hooks exit cleanly, doctor is ok; it runs in the harness repository check. The release script treats a removed, newly required, re-defaulted or narrowed config key as a breaking change. Every runs.jsonl record names its harness version and harness report shows it.",
+      "status": "passing",
+      "depends_on": ["F-005"],
+      "verification": ["L1: pnpm check"],
+      "evidence": ["2026-10-24 pnpm check → pass (working tree on bbc9a95)"],
+      "attempts": 0,
+      "notes": "Requested 2026-10-24: automatic updates must not let a harness regression spread. Loop PR titles never carry !, so breaking changes must be found from the schema."
+    },
+    {
+      "id": "F-007",
+      "priority": 7,
+      "area": "loop",
+      "title": "Staged rollout and quarantine of harness releases",
+      "user_visible_behavior": "With update.auto the loop takes the newest release that is at least update.minAgeHours old (default 6, 0 for a canary), not a draft or prerelease and not quarantined. A version is quarantined by an open or completed harness-quarantine issue in the harness repository; closing it as not planned lifts it. A project on a quarantined version moves to the newest eligible release or back to an older one. The update PR runs the old and the new selftest; a check that regresses quarantines the release with the evidence instead of opening the PR.",
+      "status": "passing",
+      "depends_on": ["F-006"],
+      "verification": ["L1: pnpm check"],
+      "evidence": ["2026-10-24 pnpm check → pass (working tree on 03fb1c5)"],
+      "attempts": 0,
+      "notes": "Requested 2026-10-24: catch a bad release in one project and keep it from reaching the others."
+    },
+    {
+      "id": "F-008",
+      "priority": 8,
+      "area": "loop",
+      "title": "Probation, rollback and re-test after a harness update",
+      "user_visible_behavior": "The first feature after an update runs on probation. If it fails, is blocked or the driver errors, its branch is kept as harness/probation-vX-F-NNN and removed from the queue, the project rolls back to the previous release through a pin-only PR and re-runs the feature there. Passing on the old version quarantines the release with both outcomes; failing again clears it. The previous driver supervises the restarted one and rolls back and quarantines when it exits with an error before a probation result.",
+      "status": "passing",
+      "depends_on": ["F-007"],
+      "verification": ["L1: pnpm check"],
+      "evidence": ["2026-10-24 pnpm check → pass (working tree on a2ecf8e)"],
+      "attempts": 0,
+      "notes": "Requested 2026-10-24: a harness regression must not burn feature attempts and must be traced to the release that caused it."
+    },
+    {
+      "id": "F-009",
+      "priority": 9,
+      "area": "loop",
+      "title": "Canary rollout: the first loop tests a release, the others take only verified ones",
+      "user_visible_behavior": "Each release gets a rollout issue in the harness repository. The first project loop with update.auto and update.canary that starts a feature claims the release there (earliest active claim comment wins), updates and runs its probation, renewing the claim while it tests. A pass marks the release verified; other projects take only verified releases. A claim lapses after update.canaryHours (default 4) without renewal, so another loop may take over. A failed update or an inconclusive re-test releases the claim; a quarantine closes the rollout issue.",
+      "status": "passing",
+      "depends_on": ["F-008"],
+      "verification": ["L1: pnpm check"],
+      "evidence": ["2026-10-24 pnpm check → pass (working tree on 38c2998)"],
+      "attempts": 0,
+      "notes": "Requested 2026-10-24: replace the fixed waiting time (update.minAgeHours, unreleased) with a first-come canary, so no project takes a release nobody tested. The 4 h the user called the quarantine time is the claim window."
     }
   ]
 }

@@ -85,6 +85,7 @@
     "Bash(pnpm harness:verify *)",
     "Bash(pnpm harness:clean-state*)",
     "Bash(pnpm harness:doctor)",
+    "Bash(pnpm harness:selftest)",
     "Bash(pnpm exec prettier*)",
     "Bash(pnpm exec tsc*)",
     "Bash(FAST=1 ./init.sh)",
@@ -108,7 +109,9 @@
     "src/config.ts",
     "src/loop.ts",
     "src/retro.ts",
-    "src/review.ts"
+    "src/review.ts",
+    "src/update.ts",
+    "scripts/release.ts"
   ],
   "review": {
     "mode": "human"
