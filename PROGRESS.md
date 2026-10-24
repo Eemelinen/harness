@@ -59,7 +59,8 @@ this file to change on every branch; keep that heading text exactly.
   `gh pr merge --disable-auto` (the stub records the worktree state) and pushes only when that
   succeeded; `pinPrFailed` disables auto-merge, reports "conflicts with main", runs no `claude`.
   A mutation check (handBack without the abort) fails the test. docs/how-it-works.md lists every
-  give-up case of the conflict path.
+  give-up case of the conflict path. Verification: `pnpm harness:verify F-016` → pass (commit
+  7d454c1).
 
 ### Session 005 — 2026-10-24 (F-016, driver-run)
 
