@@ -144,14 +144,18 @@ rely on `allowedTools` alone.
 closing terminal, IDE task or chat session sends SIGHUP or SIGTERM to the processes it started.
 
 - The driver logs `<signal>: stopping` and sends the running session SIGINT, then SIGTERM if it
-  hasn't ended after 30 s. No further session, push or PR starts.
+  hasn't ended after 30 s. No further session, push, PR or restart starts.
 - It records the attempt as `aborted` in `runs.jsonl` with `stopped by <signal>` in its `note`,
-  notifies, and exits with 128 + the signal number (130, 143, 129).
-- A second signal exits at once and ends the session; nothing more is recorded. A repeat within
-  2 s counts as the same signal, because a terminal signals the whole process group and pnpm
-  passes it on again.
+  notifies, and exits with 128 + the signal number (130, 143, 129). The row is written wherever
+  the stop lands: after the session, the evaluator or the safety review, and also when the stop
+  ends the attempt with an error. An attempt that already has its own row (after its `pr` row, in
+  the merge wait) gets no second one; a stop between two features records nothing.
+- A second signal exits at once and ends the session; the attempt still gets its `aborted` row,
+  with no cost (the session's result never arrives). A repeat within 2 s counts as the same
+  signal, because a terminal signals the whole process group and pnpm passes it on again.
 - A driver waiting for its restarted self (after an update) passes the signal on to it, and the
-  restarted driver stops the same way.
+  restarted driver stops the same way. A stop during the update itself starts no restarted driver:
+  the pins stay moved, so the next loop run starts on the new version (without its probation).
 
 The interrupted feature's branch and worktree stay, uncommitted changes included. A restarted
 loop skips a feature whose branch exists, so continue it with `pnpm harness:loop --feature F-NNN`;

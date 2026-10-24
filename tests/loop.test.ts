@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process'
+import { EventEmitter } from 'node:events'
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -6,20 +7,27 @@ import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
+  abortedRecord,
   asideBranch,
+  listenForStop,
+  loopExit,
   mergeResult,
   pinBranch,
   pluginDir,
   queueEmptyNotice,
   probationResult,
   readCarry,
+  restartRefusal,
   retryFeature,
+  runRecorder,
   signalExitCode,
   STOP_SIGNALS,
   stopHandler,
+  stopNote,
   stopNotice,
   supervise,
   withHarnessVersion,
+  type RunRecord,
   type Signalable,
 } from '../src/loop'
 
@@ -356,5 +364,209 @@ describe('stopNotice', () => {
     expect(notice).toContain('loop stopped by SIGHUP during F-032 (recorded as aborted)')
     expect(notice).toContain('feat/F-032')
     expect(notice).toContain('pnpm harness:loop --feature F-032')
+  })
+})
+
+describe('listenForStop', () => {
+  for (const signal of STOP_SIGNALS)
+    it(`registers ${signal} and records it as the stop signal`, () => {
+      const proc = new EventEmitter()
+      const session = { sent: [] as NodeJS.Signals[], exitCode: null, signalCode: null }
+      const stop = listenForStop(
+        { on: (event, listener) => proc.on(event, listener) },
+        {
+          log: () => {},
+          session: () => ({ ...session, kill: (s) => (session.sent.push(s), true) }),
+          driver: () => undefined,
+          exit: () => {},
+          graceMs: 60_000,
+        },
+      )
+      expect(stop.signal).toBeUndefined()
+      proc.emit(signal, signal)
+      expect(stop.signal).toBe(signal)
+      expect(session.sent).toEqual(['SIGINT'])
+      for (const other of STOP_SIGNALS) expect(proc.listenerCount(other)).toBe(1)
+    })
+
+  for (const [signal, code] of [
+    ['SIGTERM', 143],
+    ['SIGHUP', 129],
+  ] as const)
+    it(`a real process stopped by ${signal} logs it, notifies and exits ${code}`, async () => {
+      // The loop's own wiring: listenForStop on the process, then loopExit once the step ended.
+      const script = `
+        import { listenForStop, loopExit } from ${JSON.stringify(path.resolve('src/loop.ts'))}
+        const stop = listenForStop(process, {
+          log: (l) => console.log('log: ' + l),
+          session: () => undefined,
+          driver: () => undefined,
+          exit: (c) => process.exit(c),
+        })
+        console.log('ready')
+        const step = setInterval(() => {
+          if (!stop.signal) return
+          clearInterval(step)
+          process.exitCode = loopExit(stop.signal, 'F-032', {
+            branchPrefix: 'feat/',
+            notify: (m) => console.log('notify: ' + m),
+            log: (l) => console.log('log: ' + l),
+          })
+        }, 20)`
+      const proc = spawn(
+        process.execPath,
+        ['--import', 'tsx', '--input-type=module', '-e', script],
+        {
+          stdio: ['ignore', 'pipe', 'inherit'],
+        },
+      )
+      let out = ''
+      proc.stdout.on('data', (chunk: Buffer) => (out += chunk.toString()))
+      await new Promise<void>((resolve) =>
+        proc.stdout.on('data', () => out.includes('ready') && resolve()),
+      )
+      const exited = new Promise<number | null>((resolve) => proc.on('exit', (c) => resolve(c)))
+      proc.kill(signal)
+      expect(await exited).toBe(code)
+      expect(out).toContain(`log: ${signal}: stopping after the current step`)
+      expect(out).toContain(`notify: loop stopped by ${signal} during F-032 (recorded as aborted)`)
+    })
+})
+
+describe('runRecorder', () => {
+  const open = { feature: 'F-032', attempt: 2, trace: '/t/F-032.generator.jsonl', started: 0 }
+
+  function setup() {
+    const rows: RunRecord[] = []
+    const recorder = runRecorder(
+      (r) => rows.push(r),
+      () => 7 * 60_000,
+    )
+    return { rows, recorder }
+  }
+
+  const row = (r: Partial<RunRecord>): RunRecord => ({
+    ts: '2026-10-24T00:00:00.000Z',
+    feature: 'F-032',
+    attempt: 2,
+    outcome: 'failed',
+    costUsd: 0,
+    turns: 0,
+    minutes: 0,
+    trace: '',
+    ...r,
+  })
+
+  for (const signal of STOP_SIGNALS)
+    it(`records the open attempt as aborted with "stopped by ${signal}"`, () => {
+      const { rows, recorder } = setup()
+      recorder.start(open)
+      expect(recorder.abort(signal, { costUsd: 1.5, turns: 40 })).toBe(true)
+      expect(rows).toEqual([
+        {
+          ts: new Date(7 * 60_000).toISOString(),
+          feature: 'F-032',
+          attempt: 2,
+          outcome: 'aborted',
+          costUsd: 1.5,
+          turns: 40,
+          minutes: 7,
+          trace: '/t/F-032.generator.jsonl',
+          note: `stopped by ${signal}`,
+        },
+      ])
+    })
+
+  it('records an attempt once: a second abort (a second signal after the first) adds nothing', () => {
+    const { rows, recorder } = setup()
+    recorder.start(open)
+    recorder.abort('SIGTERM')
+    expect(recorder.abort('SIGTERM')).toBe(false)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ costUsd: 0, turns: 0, note: 'stopped by SIGTERM' })
+  })
+
+  it("adds no aborted row after the attempt's own row (a pr row before the merge wait)", () => {
+    const { rows, recorder } = setup()
+    recorder.start(open)
+    recorder.record(row({ outcome: 'pr', pr: 'https://example.test/pr/1' }))
+    expect(recorder.abort('SIGHUP')).toBe(false)
+    expect(rows.map((r) => r.outcome)).toEqual(['pr'])
+  })
+
+  it('keeps the attempt open across rows of other features and attempts', () => {
+    const { rows, recorder } = setup()
+    recorder.start(open)
+    recorder.record(row({ feature: 'harness', attempt: 1, outcome: 'updated' }))
+    recorder.record(row({ attempt: 1 }))
+    expect(recorder.abort('SIGINT')).toBe(true)
+    expect(rows.map((r) => r.outcome)).toEqual(['updated', 'failed', 'aborted'])
+  })
+
+  it('records nothing before an attempt started', () => {
+    const { rows, recorder } = setup()
+    expect(recorder.abort('SIGTERM')).toBe(false)
+    expect(rows).toEqual([])
+  })
+})
+
+describe('abortedRecord', () => {
+  it('carries the signal in its note and the minutes since the feature started', () => {
+    const rec = abortedRecord(
+      { feature: 'F-001', attempt: 1, trace: 't', started: 60_000 },
+      'SIGHUP',
+      { costUsd: 2, turns: 3 },
+      4 * 60_000,
+    )
+    expect(rec).toMatchObject({ outcome: 'aborted', minutes: 3, note: 'stopped by SIGHUP' })
+    expect(stopNote('SIGTERM')).toBe('stopped by SIGTERM')
+  })
+})
+
+describe('loopExit', () => {
+  function setup() {
+    const notices: string[] = []
+    const lines: string[] = []
+    const deps = {
+      branchPrefix: 'feat/',
+      notify: (m: string) => notices.push(m),
+      log: (l: string) => lines.push(l),
+    }
+    return { notices, lines, deps }
+  }
+
+  for (const [signal, code] of [
+    ['SIGHUP', 129],
+    ['SIGINT', 130],
+    ['SIGTERM', 143],
+  ] as const)
+    it(`after ${signal} notifies with stopNotice and returns ${code}`, () => {
+      const { notices, lines, deps } = setup()
+      expect(loopExit(signal, 'F-032', deps)).toBe(code)
+      expect(notices).toEqual([stopNotice(signal, 'F-032', 'feat/')])
+      expect(lines).toEqual([])
+    })
+
+  it('notifies a stop between features without naming one', () => {
+    const { notices, deps } = setup()
+    expect(loopExit('SIGTERM', undefined, deps)).toBe(143)
+    expect(notices).toEqual(['loop stopped by SIGTERM'])
+  })
+
+  it('returns 0 and only logs when no signal stopped the loop', () => {
+    const { notices, lines, deps } = setup()
+    expect(loopExit(undefined, undefined, deps)).toBe(0)
+    expect(notices).toEqual([])
+    expect(lines[0]).toMatch(/^loop finished on /)
+  })
+})
+
+describe('restartRefusal', () => {
+  it('refuses the restart once a stop signal arrived, so no driver starts that misses it', () => {
+    expect(restartRefusal(undefined, '0.3.8')).toBeUndefined()
+    for (const signal of STOP_SIGNALS)
+      expect(restartRefusal(signal, '0.3.8')).toBe(
+        `${signal}: not restarting on harness v0.3.8; the pins stay moved, so the next loop run starts on it`,
+      )
   })
 })

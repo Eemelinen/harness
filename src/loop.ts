@@ -17,9 +17,10 @@
  * folder being trusted. A session whose init event does not list the plugin is stopped at once:
  * an unattended session without the guard must not run.
  *
- * SIGINT, SIGTERM and SIGHUP stop the loop alike (stopHandler): the current session gets SIGINT,
- * the attempt is recorded as `aborted` with the signal, the driver notifies and exits 128 + the
- * signal number; a second signal exits at once (docs/how-it-works.md → Operating the loop).
+ * SIGINT, SIGTERM and SIGHUP stop the loop alike (listenForStop, stopHandler): the current
+ * session gets SIGINT, the open attempt is recorded as `aborted` with the signal (runRecorder),
+ * and the driver notifies and exits 128 + the signal number (loopExit). A second signal exits at
+ * once (docs/how-it-works.md → Stopping the loop).
  *
  * With `update.auto`, before each feature the driver moves to the harness release pickTarget chooses
  * (src/update.ts: verified by a canary, or claimed by this project as canary on its rollout issue,
@@ -225,9 +226,8 @@ export interface Signalable {
 let currentChild: Signalable | undefined
 /** The driver restarted on another harness version, while this one waits for it. */
 let restartedDriver: Signalable | undefined
-let aborting = false
-/** The signal that stopped the loop (SIGINT, SIGTERM or SIGHUP). */
-let stopSignal: NodeJS.Signals | undefined
+/** Set by listenForStop: `stop.signal` is the signal that stopped the loop, once one arrived. */
+let stop: StopState = {}
 
 export const STOP_SIGNALS: NodeJS.Signals[] = ['SIGINT', 'SIGTERM', 'SIGHUP']
 /** How long a session has to end after its SIGINT before it gets SIGTERM. */
@@ -290,8 +290,111 @@ export function stopHandler(deps: {
   }
 }
 
+/** Whether, and by which signal, the loop is stopping. */
+export interface StopState {
+  signal?: NodeJS.Signals
+}
+
+/**
+ * Registers one stopHandler for every STOP_SIGNALS on `proc` (the process in loopCommand). The
+ * returned state carries the first signal, which every later step checks.
+ */
+export function listenForStop(
+  proc: { on(event: NodeJS.Signals, listener: (signal: NodeJS.Signals) => void): unknown },
+  deps: Omit<Parameters<typeof stopHandler>[0], 'onStop'>,
+): StopState {
+  const state: StopState = {}
+  const handler = stopHandler({ ...deps, onStop: (signal) => (state.signal = signal) })
+  for (const signal of STOP_SIGNALS) proc.on(signal, handler)
+  return state
+}
+
 /** The `note` of a run the stop signal ended. */
-const stopNote = () => `stopped by ${stopSignal ?? 'SIGINT'}`
+export const stopNote = (signal: NodeJS.Signals) => `stopped by ${signal}`
+
+/** The attempt in progress: the one a stop records as `aborted` while it has no row of its own. */
+export interface OpenAttempt {
+  feature: string
+  attempt: number
+  trace: string
+  /** When the feature's run started (ms), the base of every row's `minutes`. */
+  started: number
+}
+
+/** The `aborted` row of an attempt a stop signal ended. */
+export function abortedRecord(
+  open: OpenAttempt,
+  signal: NodeJS.Signals,
+  spent: { costUsd: number; turns: number },
+  now: number,
+): RunRecord {
+  return {
+    ts: new Date(now).toISOString(),
+    feature: open.feature,
+    attempt: open.attempt,
+    outcome: 'aborted',
+    costUsd: spent.costUsd,
+    turns: spent.turns,
+    minutes: Math.round((now - open.started) / 60000),
+    trace: open.trace,
+    note: stopNote(signal),
+  }
+}
+
+/**
+ * Writes run records and remembers the attempt in progress, so a stop records that attempt as
+ * `aborted` wherever it lands: after a session, in an error thrown while stopping, or on a second
+ * signal. A row of the attempt's own (failed, blocked, pr, aborted …) closes it, so an attempt
+ * never gets two closing rows; after its `pr` row the merge wait adds no `aborted` row.
+ */
+export function runRecorder(write: (rec: RunRecord) => void, now: () => number = Date.now) {
+  let open: OpenAttempt | undefined
+  const record = (rec: RunRecord) => {
+    if (open && rec.feature === open.feature && rec.attempt === open.attempt) open = undefined
+    write(rec)
+  }
+  return {
+    start(attempt: OpenAttempt) {
+      open = attempt
+    },
+    record,
+    /** Records the open attempt as aborted by `signal`; false when no attempt is open. */
+    abort(signal: NodeJS.Signals, spent = { costUsd: 0, turns: 0 }): boolean {
+      if (!open) return false
+      record(abortedRecord(open, signal, spent, now()))
+      return true
+    },
+  }
+}
+
+/**
+ * The log line when a stop signal arrived before the driver restarts on another version: the
+ * restarted driver would not get the signal and would go on looping, so it is not started.
+ */
+export function restartRefusal(
+  signal: NodeJS.Signals | undefined,
+  version: string,
+): string | undefined {
+  if (!signal) return undefined
+  return `${signal}: not restarting on harness v${version}; the pins stay moved, so the next loop run starts on it`
+}
+
+/**
+ * How loopCommand ends: after a stop signal it notifies (stopNotice) and returns 128 + the
+ * signal's number, otherwise it logs the end and returns 0. `feature` is the one the stop cut short.
+ */
+export function loopExit(
+  signal: NodeJS.Signals | undefined,
+  feature: string | undefined,
+  deps: { branchPrefix: string; notify: (msg: string) => void; log: (line: string) => void },
+): number {
+  if (signal) {
+    deps.notify(stopNotice(signal, feature, deps.branchPrefix))
+    return signalExitCode(signal)
+  }
+  deps.log(`loop finished on ${today()}; run pnpm harness:report for the summary`)
+  return 0
+}
 
 function runClaude(runSpec: ClaudeRun): Promise<ClaudeResult> {
   mkdirSync(path.dirname(runSpec.traceFile), { recursive: true })
@@ -675,7 +778,7 @@ async function runEvaluator(
 // Run log
 // ---------------------------------------------------------------------------------------
 
-interface RunRecord {
+export interface RunRecord {
   ts: string
   feature: string
   attempt: number
@@ -706,7 +809,10 @@ interface RunRecord {
   harness?: string
 }
 
-function record(rec: RunRecord) {
+const recorder = runRecorder(writeRecord)
+const record = recorder.record
+
+function writeRecord(rec: RunRecord) {
   const file = path.join(ROOT, config.runsLog)
   mkdirSync(path.dirname(file), { recursive: true })
   appendFileSync(file, `${JSON.stringify(withHarnessVersion(rec))}\n`)
@@ -862,6 +968,7 @@ async function runFeature(
       return 'done'
     }
 
+    recorder.start({ feature: id, attempt, trace: traceFile, started })
     const gen = await runClaude({
       cwd: dir,
       args: generatorArgs,
@@ -879,21 +986,11 @@ async function runFeature(
     const turns = Number(gen.result?.num_turns ?? 0)
     const minutes = () => Math.round((Date.now() - started) / 60000)
     // A stop signal ends the attempt after any session: no further session, push or PR starts.
-    const aborted = (costUsd: number): IterationOutcome => {
-      record({
-        ts: new Date().toISOString(),
-        feature: id,
-        attempt,
-        outcome: 'aborted',
-        costUsd,
-        turns,
-        minutes: minutes(),
-        trace: traceFile,
-        note: stopNote(),
-      })
+    const aborted = (signal: NodeJS.Signals, costUsd: number): IterationOutcome => {
+      recorder.abort(signal, { costUsd, turns })
       return 'aborted'
     }
-    if (aborting) return aborted(cost)
+    if (stop.signal) return aborted(stop.signal, cost)
 
     const check = postCheck(dir, id)
 
@@ -940,7 +1037,7 @@ async function runFeature(
     )
 
     const { verdict, cost: evalCost } = await runEvaluator(id, feature, dir, plugin)
-    if (aborting) return aborted(cost + evalCost)
+    if (stop.signal) return aborted(stop.signal, cost + evalCost)
 
     if (!verdict || verdict.verdict === 'Revise') {
       const findings = verdict
@@ -992,7 +1089,7 @@ async function runFeature(
 
     // Accept → the merge gate, then publish.
     const gate = await reviewGate(id, feature, dir, intake?.safety)
-    if (aborting) return aborted(cost + evalCost + gate.cost)
+    if (stop.signal) return aborted(stop.signal, cost + evalCost + gate.cost)
     const review = gate.hold
     const { url: pr } = publish(
       id,
@@ -1370,7 +1467,7 @@ async function waitForMerge(pr: string, auto: boolean, handled: Set<string>): Pr
       log(
         `… still waiting for the merge (${Math.round((Date.now() - waitStarted) / 60000)} min, ${pending} check(s) pending)`,
       )
-    if (aborting) throw new Error('aborted while waiting for merge')
+    if (stop.signal) throw new Error('aborted while waiting for merge')
     await sleep(60_000)
   }
 }
@@ -1466,7 +1563,7 @@ async function shepherdPr(run: PrRun): Promise<'merged' | 'blocked' | 'aborted'>
         continue
       }
     }
-    if (aborting) return 'aborted'
+    if (stop.signal) return 'aborted'
     const names = failed.map((c) => c.name).join(', ')
     if (ciAttempt >= max)
       return giveUp(run, `CI still failing after ${max} fix attempt(s): ${names}`, evidence)
@@ -1506,13 +1603,13 @@ async function shepherdPr(run: PrRun): Promise<'merged' | 'blocked' | 'aborted'>
     const cost = Number(fix.result?.total_cost_usd ?? 0)
     const turns = Number(fix.result?.num_turns ?? 0)
     const fixRecord = { ...base, costUsd: cost, turns, trace: traceFile }
-    if (aborting) {
+    if (stop.signal) {
       record({
         ...fixRecord,
         ts: new Date().toISOString(),
         outcome: 'aborted',
         minutes: minutes(),
-        note: stopNote(),
+        note: stopNote(stop.signal),
       })
       return 'aborted'
     }
@@ -2019,7 +2116,7 @@ async function pinPr(
     )
     return { state: 'failed', pr }
   } catch (error) {
-    if (aborting) throw error
+    if (stop.signal) throw error
     notify(
       `harness ${forward ? 'update' : 'rollback'} to v${target} failed, the loop stays on v${installed}: ${error instanceof Error ? error.message : String(error)}`,
     )
@@ -2479,17 +2576,16 @@ export async function loopCommand(argv: string[]): Promise<number> {
     return 0
   }
 
-  const onSignal = stopHandler({
+  stop = listenForStop(process, {
     log,
     session: () => currentChild,
     driver: () => restartedDriver,
-    onStop: (signal) => {
-      aborting = true
-      stopSignal = signal
+    exit: (code) => {
+      // A second signal: the attempt cut short still gets its row before the driver exits.
+      if (stop.signal) recorder.abort(stop.signal)
+      process.exit(code)
     },
-    exit: (code) => process.exit(code),
   })
-  for (const signal of STOP_SIGNALS) process.on(signal, onSignal)
 
   const carried = process.env[CARRY_ENV]
   delete process.env[CARRY_ENV]
@@ -2549,14 +2645,30 @@ export async function loopCommand(argv: string[]): Promise<number> {
   let stoppedDuring: string | undefined
   for (;;) {
     // No update while a re-test runs: it must run on the version it rolled back to.
-    const moved = carry.retry ? undefined : await maybeUpdate(opts, carry)
+    let moved: string | undefined
+    try {
+      moved = carry.retry ? undefined : await maybeUpdate(opts, carry)
+    } catch (error) {
+      if (!stop.signal) throw error
+      // The stop cut the update short (its pin PR's merge wait): stop, don't crash.
+      log(
+        `harness update: ${error instanceof Error ? error.message : String(error)} (${stopNote(stop.signal)})`,
+      )
+      break
+    }
     if (moved) {
+      // Checked right before the spawn: a signal from now on reaches the restarted driver.
+      const refusal = restartRefusal(stop.signal, moved)
+      if (refusal) {
+        log(refusal)
+        break
+      }
       const probation = carry.probation
       const child = await restart(snapshot(), moved)
       await new Promise((resolve) => setImmediate(resolve)) // let a pending stop-signal handler run
       const verdict = supervise({
         code: child.code,
-        aborted: aborting || child.signal !== null,
+        aborted: stop.signal !== undefined || child.signal !== null,
         probation,
         records: readRunRecords().filter((r) => r.ts >= child.since),
       })
@@ -2565,7 +2677,7 @@ export async function loopCommand(argv: string[]): Promise<number> {
       if (!(await rollbackCrashed(opts, probation, child))) break
       continue
     }
-    if (aborting) break
+    if (stop.signal) break
     const list = readFeatureList(project.resolve(config.project.featureList), config.features)
     const inFlight = inFlightIds()
     let feature: Feature | undefined
@@ -2631,9 +2743,13 @@ export async function loopCommand(argv: string[]): Promise<number> {
       outcome = await runFeature(feature, opts, intake)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      if (aborting) {
+      if (stop.signal) {
         // A step the stop signal cut short (the merge wait, a killed session); stop, don't crash.
-        log(`${feature.id}: ${message} (${stopNote()})`)
+        // An attempt without a row of its own yet (no `pr` row before the merge wait) gets one.
+        const recorded = recorder.abort(stop.signal)
+        log(
+          `${feature.id}: ${message} (${stopNote(stop.signal)}${recorded ? '; recorded as aborted' : ''})`,
+        )
         stoppedDuring = feature.id
         break
       }
@@ -2711,6 +2827,11 @@ export async function loopCommand(argv: string[]): Promise<number> {
         // The restart blocks this process's timer; the restarted driver renews from the carry.
         keepClaim(undefined)
         settleCanary(probation.canary, (c) => renewClaim(c, config.update.canaryHours, ROOT))
+        const refusal = restartRefusal(stop.signal, probation.from)
+        if (refusal) {
+          log(refusal)
+          break
+        }
         return (await restart(snapshot(), probation.from)).code
       }
     }
@@ -2760,12 +2881,11 @@ export async function loopCommand(argv: string[]): Promise<number> {
     }
     if (opts.once) break
   }
-  if (stopSignal) {
-    notify(stopNotice(stopSignal, stoppedDuring, config.project.branchPrefix))
-    return signalExitCode(stopSignal)
-  }
-  log(`loop finished on ${today()}; run pnpm harness:report for the summary`)
-  return 0
+  return loopExit(stop.signal, stoppedDuring, {
+    branchPrefix: config.project.branchPrefix,
+    notify,
+    log,
+  })
 }
 
 /** The notification when a stop signal ended the loop; `feature` is the one it interrupted. */
