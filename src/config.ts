@@ -41,6 +41,11 @@ const pathRule = z.object({
   tools: z.array(z.enum(['Edit', 'Write', 'MultiEdit'])).optional(),
   /** Only when the edit's old/new text or the written content matches this expression. */
   contentPattern: z.string().min(1).optional(),
+  /**
+   * Not for a file missing at the merge base of HEAD and the default branch (one this branch
+   * added, tracked or not); evaluation moves on to the next rule. Fires when git can't tell.
+   */
+  exceptNewOnBranch: z.boolean().default(false),
 })
 
 const diffCheck = z.object({

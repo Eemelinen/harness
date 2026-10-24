@@ -4,7 +4,7 @@
 //   exit 2 + stderr  → the tool call is blocked and Claude sees the reason
 //   JSON on stdout   → permissionDecision deny | ask
 import { evaluate } from './guard-rules.mjs'
-import { loadConfig, projectDir, readInput, runHarness } from './lib.mjs'
+import { existsOnBaseIn, loadConfig, projectDir, readInput, runHarness } from './lib.mjs'
 
 async function main() {
   const input = await readInput()
@@ -16,6 +16,7 @@ async function main() {
     config,
     loop: process.env.HARNESS_LOOP === '1',
     checkFeatureList: () => runHarness(root, ['check']),
+    existsOnBase: existsOnBaseIn(root, config.project),
   })
   if (!outcome) return
   if (outcome.block) {

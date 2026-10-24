@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -163,6 +163,60 @@ describe('guard: Edit/Write', () => {
     ).toBe('marker block')
   })
 
+  it('lets an exceptNewOnBranch rule pass files missing at the merge base', () => {
+    const rules = {
+      guard: {
+        paths: [
+          {
+            match: 'src/migrations/*',
+            decision: 'ask',
+            reason: 'migrations are generated',
+            exceptNewOnBranch: true,
+          },
+          { match: 'src/*', decision: 'deny', reason: 'later rule' },
+          { match: 'docs/*', decision: 'ask', reason: 'docs' },
+        ],
+      },
+    }
+    const calls: string[] = []
+    const onBase: Record<string, boolean | null> = {
+      'src/migrations/new.ts': false,
+      'src/migrations/old.ts': true,
+      'src/migrations/unknown.ts': null,
+      'docs/new.md': false,
+    }
+    const decide = (file: string, existsOnBase?: (rel: string) => boolean | null) =>
+      evaluate(
+        { tool_name: 'Edit', tool_input: { file_path: path.join(root, file) } },
+        {
+          root,
+          config: rules,
+          loop: true,
+          checkFeatureList: () => ({ code: 0, out: '' }),
+          existsOnBase,
+        },
+      )
+    const known = (rel: string) => {
+      calls.push(rel)
+      return onBase[rel] ?? null
+    }
+    // A new file skips the rule; evaluation moves on to the next one.
+    expect(decide('src/migrations/new.ts', known)).toEqual({
+      decision: 'deny',
+      reason: 'later rule',
+    })
+    expect(decide('src/migrations/old.ts', known)?.reason).toBe('migrations are generated')
+    expect(decide('src/migrations/unknown.ts', known)?.reason).toBe('migrations are generated')
+    expect(decide('src/migrations/new.ts')?.reason).toBe('migrations are generated')
+    // Rules without the key never ask git.
+    expect(decide('docs/new.md', known)?.reason).toBe('docs')
+    expect(calls).toEqual([
+      'src/migrations/new.ts',
+      'src/migrations/old.ts',
+      'src/migrations/unknown.ts',
+    ])
+  })
+
   it('confines driver-run sessions to the worktree and the temp directory', () => {
     expect(edit('Write', path.resolve('/elsewhere/file.ts'), {}, true)?.decision).toBe('deny')
     expect(edit('Write', path.join(tmpdir(), 'scratch.txt'), {}, true)).toBeNull()
@@ -235,6 +289,92 @@ describe('guard.mjs as a hook process', () => {
         permissionDecision: 'deny',
         permissionDecisionReason: 'guard: generated',
       },
+    })
+  })
+
+  describe('exceptNewOnBranch against git', () => {
+    const git = (dir: string, ...args: string[]) => {
+      const res = spawnSync(
+        'git',
+        [
+          '-c',
+          'user.name=t',
+          '-c',
+          'user.email=t@example.com',
+          '-c',
+          'commit.gpgsign=false',
+          ...args,
+        ],
+        { cwd: dir, encoding: 'utf8' },
+      )
+      if (res.status !== 0) throw new Error(`git ${args.join(' ')}: ${res.stderr}`)
+      return res.stdout.trim()
+    }
+    const write = (dir: string, file: string, content = 'x\n') => {
+      mkdirSync(path.dirname(path.join(dir, file)), { recursive: true })
+      writeFileSync(path.join(dir, file), content)
+    }
+    const migrations = {
+      project: { defaultBranch: 'trunk' },
+      guard: {
+        paths: [
+          {
+            match: 'src/migrations/*',
+            decision: 'ask',
+            reason: 'migrations are generated',
+            exceptNewOnBranch: true,
+          },
+        ],
+      },
+    }
+    const decision = (dir: string, file: string) => {
+      const res = runHook(dir, {
+        tool_name: 'Edit',
+        tool_input: { file_path: path.join(dir, file), old_string: 'x', new_string: 'y' },
+      })
+      expect(res.status).toBe(0)
+      return res.stdout === '' ? null : JSON.parse(res.stdout).hookSpecificOutput.permissionDecision
+    }
+
+    /** `trunk` has old.ts; the feature branch commits added.ts and leaves untracked.ts untracked. */
+    function repo() {
+      const dir = mkdtempSync(path.join(tmpdir(), 'harness-guard-git-'))
+      git(dir, 'init', '-q', '-b', 'trunk')
+      write(dir, 'harness.config.json', JSON.stringify(migrations))
+      write(dir, 'src/migrations/old.ts')
+      git(dir, 'add', '-A')
+      git(dir, 'commit', '-q', '-m', 'init')
+      git(dir, 'checkout', '-q', '-b', 'feat/F-001')
+      write(dir, 'src/migrations/added.ts')
+      git(dir, 'add', '-A')
+      git(dir, 'commit', '-q', '-m', 'feat: migration')
+      write(dir, 'src/migrations/untracked.ts')
+      return dir
+    }
+
+    it('passes files the branch added and guards files on the default branch', () => {
+      const dir = repo()
+      expect(decision(dir, 'src/migrations/added.ts')).toBeNull()
+      expect(decision(dir, 'src/migrations/untracked.ts')).toBeNull()
+      expect(decision(dir, 'src/migrations/brand-new.ts')).toBeNull()
+      expect(decision(dir, 'src/migrations/old.ts')).toBe('ask')
+    })
+
+    it('prefers the remote default branch for the merge base', () => {
+      const dir = repo()
+      // origin/trunk is ahead of the local trunk and already has added.ts.
+      git(dir, 'update-ref', 'refs/remotes/origin/trunk', 'HEAD')
+      expect(decision(dir, 'src/migrations/added.ts')).toBe('ask')
+      expect(decision(dir, 'src/migrations/untracked.ts')).toBeNull()
+    })
+
+    it('fires when git cannot answer', () => {
+      const noRepo = mkdtempSync(path.join(tmpdir(), 'harness-guard-nogit-'))
+      write(noRepo, 'harness.config.json', JSON.stringify(migrations))
+      expect(decision(noRepo, 'src/migrations/new.ts')).toBe('ask')
+      const noBase = repo()
+      write(noBase, 'harness.config.json', JSON.stringify({ ...migrations, project: {} }))
+      expect(decision(noBase, 'src/migrations/added.ts')).toBe('ask')
     })
   })
 

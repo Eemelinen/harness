@@ -62,6 +62,37 @@ export function runHarness(root, args) {
   return { code: res.status ?? 1, out: `${res.stdout ?? ''}${res.stderr ?? ''}`.trim() }
 }
 
+/**
+ * `existsOnBase(rel)` for the guard's `exceptNewOnBranch` path rules: whether the repo-relative
+ * file exists at the merge base of HEAD and the default branch (`<remote>/<defaultBranch>` first,
+ * then `<defaultBranch>`). null when git can't answer: not a repository, git missing, no merge
+ * base. The merge base is looked up once, on the first call.
+ */
+export function existsOnBaseIn(root, project) {
+  const git = (args) =>
+    spawnSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+  const branch = project?.defaultBranch || 'main'
+  const remote = project?.remote || 'origin'
+  let base
+  return (rel) => {
+    if (base === undefined) {
+      base = null
+      for (const ref of [`${remote}/${branch}`, branch]) {
+        const res = git(['merge-base', 'HEAD', ref])
+        if (res.status === 0 && res.stdout.trim()) {
+          base = res.stdout.trim()
+          break
+        }
+      }
+    }
+    if (base === null) return null
+    // `<rev>:./<path>` resolves the path from the working directory, which may be below the top.
+    const res = git(['cat-file', '-e', `${base}:./${rel}`])
+    if (res.error || res.status === null) return null
+    return res.status === 0
+  }
+}
+
 export const stripAnsi = (text) => text.replace(/\x1b\[[0-9;]*m/g, '')
 
 /** Today as YYYY-MM-DD in local time. */
