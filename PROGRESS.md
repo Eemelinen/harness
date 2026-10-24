@@ -13,7 +13,7 @@ this file to change on every branch; keep that heading text exactly.
 - The repository runs its own loop: features come from `harness-retro` issues filed by project
   retros (docs/self-improvement.md). Merges that change a shipped path are released by
   `.github/workflows/release.yml` (docs/developing.md → Releasing); it needs the `RELEASE_TOKEN` secret.
-- Last verified: F-017 on this branch, `pnpm check` green on 2026-10-24.
+- Last verified: F-017 on this branch (attempt 2, commit b5d1ffa), `pnpm check` green on 2026-10-24.
 - Highest-priority unfinished feature: none (F-000…F-017 passing).
 - Current blocker: none.
 
@@ -39,6 +39,30 @@ this file to change on every branch; keep that heading text exactly.
 
 ## Session Log
 
+### Session 006 — 2026-10-24 (F-017 attempt 2, driver-run)
+
+- The evaluator returned Revise on attempt 1: the `aborted` row and the notify-and-exit path were
+  untested glue, a stop during the update step still spawned a restarted driver that never got
+  the signal, and an error thrown while stopping left no row. All four are addressed:
+  - The stop bookkeeping moved into exported functions the loop uses as-is. `listenForStop` registers
+    SIGINT/SIGTERM/SIGHUP and holds the stop state (it replaces `aborting`/`stopSignal`).
+    `runRecorder` remembers the open attempt and writes its `aborted` row (`abortedRecord`,
+    `stopNote`). `loopExit` notifies and returns 128 + n, and `restartRefusal` guards a restart.
+  - A stop records the attempt wherever it lands: after a session, in an error thrown while
+    stopping (choice: write the row when the attempt has none yet), and now also on a second
+    signal (cost 0). That replaces session 005's "second signal writes no row". An attempt's own
+    row closes it, so the merge wait after a `pr` row adds none; a stop between features records
+    nothing.
+  - Both restarts (after an update and for a rollback re-test) are skipped once a stop arrived;
+    the check sits right before the spawn, with no await in between. A throw from the update
+    step during a stop now ends the loop through the stop path instead of crashing it. The pins
+    stay moved, so the next run starts on the new version without its probation (documented).
+- Ctrl-C exits 130 instead of 0 (since attempt 1): mention it in the PR, since wrapper scripts
+  that check `$?` see it. No flag or config key changed, so it is not marked breaking.
+- Tests: each new function, plus a real process that gets SIGTERM/SIGHUP through `listenForStop`
+  and exits 143/129 after logging and notifying. A mutation check (registering SIGINT only) fails
+  5 of them. Verification: `pnpm harness:verify F-017` on b5d1ffa.
+
 ### Session 005 — 2026-10-24 (F-017, driver-run)
 
 - F-017 (retro issue #22): SIGINT, SIGTERM and SIGHUP share one handler, `stopHandler` in
@@ -54,7 +78,8 @@ this file to change on every branch; keep that heading text exactly.
   - The stop is checked after the evaluator and the safety review as well. Before this, a SIGINT
     during the evaluator gave no verdict, so the next attempt started. An error thrown while
     stopping (the merge wait) ends the loop through the stop path instead of crashing.
-  - A second signal exits without a `runs.jsonl` row (the handler doesn't know the attempt).
+  - A second signal exits without a `runs.jsonl` row (the handler doesn't know the attempt;
+    changed in session 006: it now writes the row).
   - Docs: the interrupted feature's branch stays, so a restarted loop skips it.
     `--feature F-NNN` continues it in the same worktree. A retro-intake feature exists only on
     its branch and has to be finished by hand.
