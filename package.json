@@ -1,6 +1,6 @@
 {
   "name": "@eemelinen/harness",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "description": "Agent harness for long-running coding agents: feature-list state machine, layered verification, clean-state gate, unattended loop driver and the Claude Code plugin (skills, hooks, evaluator) that goes with it.",
   "repository": {
     "type": "git",
