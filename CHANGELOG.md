@@ -4,6 +4,10 @@ Releases are git tags (`vX.Y.Z`). Projects pin the package and the plugin market
 tag; see [docs/developing.md](docs/developing.md). From v0.3.1 on, the release workflow writes each
 entry from the commit subjects since the previous tag.
 
+## v0.3.3 — 2026-10-24
+
+- Gate the retro intake on a triage label
+
 ## v0.3.2 — 2026-10-24
 
 - Give quarantine issues a log excerpt and trace paths
