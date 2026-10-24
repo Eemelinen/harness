@@ -12,8 +12,8 @@ this file to change on every branch; keep that heading text exactly.
   feature: `pnpm harness:verify F-NNN`.
 - The repository runs its own loop: features come from `harness-retro` issues filed by project
   retros (docs/self-improvement.md). Releases stay manual (docs/developing.md → Releasing).
-- Last verified: F-001 on this commit, `pnpm check` green on 2026-10-24.
-- Highest-priority unfinished feature: F-002 (session turns), then F-003 (in-flight notice).
+- Last verified: F-002 on this commit, `pnpm check` green on 2026-10-24.
+- Highest-priority unfinished feature: F-003 (in-flight notice).
 - Current blocker: none.
 
 ## Next Steps
@@ -34,6 +34,11 @@ this file to change on every branch; keep that heading text exactly.
   still run the evaluator. The projects pin v0.2.0, so each got the same rule in its
   `docs/harness/generator-notes.md` until a release reaches them.
 - Verification: `pnpm harness:verify F-001` → L1 `pnpm check` pass.
+- F-002: a session resumed by a wakeup ends each segment with its own `result`; the driver kept
+  only the last, so runs.jsonl showed 1–4 turns for $3–10 sessions (personal-finances F-015: 87 + 18
+  - 2 recorded as 2). `mergeResult` sums `num_turns`; `total_cost_usd`, `modelUsage` and
+    `duration_api_ms` are already session totals in every segment (checked against three traces), so
+    the cost was right. Verification: `pnpm harness:verify F-002` → L1 pass.
 
 ### Session 001 — 2026-10-23 (self-hosting bootstrap)
 

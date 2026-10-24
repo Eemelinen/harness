@@ -143,7 +143,7 @@ interface ClaudeResult {
   timedOut: boolean
   /** The session's init event did not list the harness plugin; it was stopped. */
   pluginMissing: boolean
-  /** The final `result` message of the stream (or the single JSON result). */
+  /** The final `result` message of the stream with every segment's turns (or the single JSON result). */
   result?: Record<string, unknown>
 }
 
@@ -154,6 +154,20 @@ interface ClaudeRun {
   traceFile: string
   wallClockMs: number
   stream: boolean
+}
+
+/**
+ * A stream-json session emits one `result` per segment: a wakeup or a background-task
+ * notification resumes it and ends in another. `num_turns` counts only that segment, while
+ * `total_cost_usd` and `modelUsage` are session totals, so the turns are summed and everything
+ * else comes from the last segment.
+ */
+export function mergeResult(
+  prev: Record<string, unknown> | undefined,
+  next: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!prev) return next
+  return { ...next, num_turns: Number(prev.num_turns ?? 0) + Number(next.num_turns ?? 0) }
 }
 
 let currentChild: ReturnType<typeof spawn> | undefined
@@ -194,7 +208,7 @@ function runClaude(runSpec: ClaudeRun): Promise<ClaudeResult> {
       } catch {
         return // non-JSON line (e.g. a warning); kept in the trace
       }
-      if (msg.type === 'result') result = msg
+      if (msg.type === 'result') result = mergeResult(result, msg)
       for (const out of describeEvent(msg, state)) log(out)
       if (
         msg.type === 'system' &&

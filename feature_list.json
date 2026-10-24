@@ -48,10 +48,10 @@
       "area": "loop",
       "title": "Session stats count every turn of a resumed session",
       "user_visible_behavior": "When a stream-json session emits several result messages (it was resumed by a wakeup or a background-task notification), runs.jsonl, the PR body and harness report show the sum of their num_turns, not only the last segment.",
-      "status": "not_started",
+      "status": "passing",
       "depends_on": [],
       "verification": ["L1: pnpm check"],
-      "evidence": [],
+      "evidence": ["2026-10-24 pnpm check → pass (working tree on 654e8aa)"],
       "attempts": 0,
       "notes": "personal-finances F-015 attempt 1 emitted results with 87, 18 and 2 turns; runs.jsonl recorded 2. Several $3–10 sessions show 1–4 turns. total_cost_usd is already cumulative."
     },

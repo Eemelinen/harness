@@ -151,7 +151,10 @@ log (`src/events.ts` formats the stream):
 
 `.harness/traces/F-NNN-<timestamp>.generator.jsonl` is the full stream (`--include-hook-events`, so
 hook blocks are visible); the `result` line at the end carries `num_turns`, `total_cost_usd`,
-`permission_denials`. The evaluator's JSON is next to it, and each CI fixer session has its own
+`permission_denials`. A session resumed by a wakeup or a background-task notification ends each
+segment with its own `result` line; `num_turns` counts only that segment, so `runs.jsonl` and the
+report record the sum, while the cost is already a session total. The evaluator's JSON is next to
+it, and each CI fixer session has its own
 `F-NNN-<timestamp>.ci-fix.jsonl`. The PR body repeats the evidence lines, the verdict table and the
 cost. `harness report` lists fixer sessions as `ci-fix` (pushed), `ci-rerun` or `failed`.
 
