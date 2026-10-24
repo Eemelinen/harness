@@ -9,6 +9,11 @@
  * which the fix PR does, keeps the bad release quarantined; the fix is a newer release.
  * A second project that finds the same release bad comments on the same issue (one fingerprint
  * per version).
+ *
+ * The issue carries what a session fixing it needs: the evidence lines, a short excerpt of the
+ * failing run's readable log, and absolute paths of its traces. Every loop runs on the same machine,
+ * so a session in the harness repository can read them; the excerpt is sized so the intake's notes
+ * (src/retro.ts → issueContext, 3000 characters) keep it.
  */
 import { mkdirSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
@@ -26,6 +31,53 @@ export interface QuarantineReport {
   /** One line: what went wrong. */
   cause: string
   evidence: string[]
+  /** Absolute paths of the failing run's readable log and traces. */
+  traces?: string[]
+  /** Lines of the failing run's readable log (excerptLog). */
+  excerpt?: string[]
+}
+
+/** Lines that say what went wrong in a readable loop log (src/events.ts formats them). */
+const TELLING = /✗|⛔|⚠|NOTIFY|post-check|evaluator|error|fail|blocked|denied|Revise|Block/i
+
+/**
+ * The part of a readable log a fixing session needs: the telling lines and the last lines, in
+ * order, without repeats, each cut to 240 characters, at most `maxChars` in all (the newest kept).
+ */
+export function excerptLog(text: string, maxLines = 30, maxChars = 1400): string[] {
+  const lines = text
+    .split('\n')
+    .map((l) => l.trimEnd())
+    .filter(Boolean)
+  const tail = new Set(lines.slice(-8).map((_, i) => lines.length - 8 + i))
+  const picked = lines
+    .map((line, i) => ({ line, i }))
+    .filter(({ line, i }) => TELLING.test(line) || tail.has(i))
+    .slice(-maxLines)
+    .map(({ line }) => (line.length > 240 ? `${line.slice(0, 237)}…` : line).replace(/```/g, "'''"))
+  const kept: string[] = []
+  let size = 0
+  for (const line of [...new Set(picked)].reverse()) {
+    if (size + line.length + 1 > maxChars) break
+    kept.unshift(line)
+    size += line.length + 1
+  }
+  return kept
+}
+
+function detailLines(r: QuarantineReport): string[] {
+  return [
+    ...(r.excerpt?.length
+      ? ['', '**Log excerpt** (the failing run)', '', '```text', ...r.excerpt, '```']
+      : []),
+    ...(r.traces?.length
+      ? [
+          '',
+          '**Traces** (absolute paths on the machine that ran the loop)',
+          ...r.traces.map((t) => `- \`${t}\``),
+        ]
+      : []),
+  ]
 }
 
 export const quarantineFingerprint = (version: string) =>
@@ -50,6 +102,7 @@ export function quarantineBody(r: QuarantineReport, projectName: string, date: s
     '',
     '**Evidence**',
     ...r.evidence.map((e) => `- ${e}`),
+    ...detailLines(r),
     '',
     'Close as **not planned** to lift the quarantine (a false alarm). The fix PR closes it as completed, which keeps this release quarantined; projects move to the fix release.',
     '',
@@ -83,6 +136,7 @@ export function quarantine(
     const comment = [
       `Seen in ${name} (${date}, previous release v${r.from}): ${r.cause}`,
       ...r.evidence.map((e) => `- ${e}`),
+      ...detailLines(r),
     ].join('\n')
     sh('gh', ['issue', 'comment', String(match.number), '--repo', repo, '--body', comment], {
       cwd: root,
