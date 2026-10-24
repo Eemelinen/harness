@@ -108,7 +108,9 @@
     "src/config.ts",
     "src/loop.ts",
     "src/retro.ts",
-    "src/review.ts"
+    "src/review.ts",
+    "src/update.ts",
+    "scripts/release.ts"
   ],
   "review": {
     "mode": "human"
