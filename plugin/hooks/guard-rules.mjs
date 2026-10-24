@@ -14,6 +14,51 @@ const has = (text, pattern) => new RegExp(pattern, 'm').test(text)
  */
 const hasAtCommand = (text, pattern) => new RegExp(`(^|[;&|(]\\s*)(?:${pattern})`).test(text)
 
+/** `<<EOF`, `<<-EOF`, `<< 'EOF'`, `<<"EOF"`; not the here-string `<<<`. */
+const HEREDOC = /(?<!<)<<(?!<)(-?)\s*(['"]?)([A-Za-z_][\w-]*)\2/g
+
+/** A shell among the words before `<<` (`bash <<EOF`, `ssh host sh <<EOF`): its body runs. */
+const SHELL = /(^|[\s/])(ba|z|da|k)?sh(\s|$)/
+
+/** True when `text` ends inside a single- or double-quoted string. */
+function insideQuotes(text) {
+  let quote = null
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]
+    if (quote === null && c === '\\') i++
+    else if (quote === null && (c === "'" || c === '"')) quote = c
+    else if (c === quote && !(quote === '"' && text[i - 1] === '\\')) quote = null
+  }
+  return quote !== null
+}
+
+/**
+ * The command without the bodies of heredocs that are data: a script for `python3 - <<EOF`,
+ * a file for `cat > x <<EOF`, a message for `git commit -F - <<EOF`. A rule that matched a word in
+ * that text blocked a call that never runs the word. Bodies fed to a shell are kept.
+ */
+export function withoutHeredocData(command) {
+  const out = []
+  const pending = []
+  for (const line of command.split('\n')) {
+    if (pending.length > 0) {
+      const doc = pending[0]
+      const end = (doc.stripTabs ? line.replace(/^\t+/, '') : line) === doc.delimiter
+      if (doc.keep || end) out.push(line)
+      if (end) pending.shift()
+      continue
+    }
+    out.push(line)
+    for (const m of line.matchAll(HEREDOC)) {
+      const before = line.slice(0, m.index)
+      if (insideQuotes(before)) continue
+      const words = before.split(/[;&|(]/).pop()
+      pending.push({ stripTabs: m[1] === '-', delimiter: m[3], keep: SHELL.test(words) })
+    }
+  }
+  return out.join('\n')
+}
+
 /** Shell `case` glob: `*` matches any characters (including `/`), `?` exactly one. */
 export function globToRegExp(glob) {
   const body = glob
@@ -48,7 +93,7 @@ export function evaluate(input, { root, config, loop, checkFeatureList }) {
   const ti = input.tool_input ?? {}
 
   if (tool === 'Bash') {
-    const cmd = typeof ti.command === 'string' ? ti.command : ''
+    const cmd = withoutHeredocData(typeof ti.command === 'string' ? ti.command : '')
     for (const rule of guard.bash ?? []) {
       if (rule.loopOnly && !loop) continue
       const hit = rule.atCommandStart ? hasAtCommand(cmd, rule.pattern) : has(cmd, rule.pattern)
