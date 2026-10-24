@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -144,6 +144,28 @@ describe('guard: Edit/Write', () => {
     expect(edit('Write', path.resolve('/elsewhere/file.ts'), {}, true)?.decision).toBe('deny')
     expect(edit('Write', path.join(tmpdir(), 'scratch.txt'), {}, true)).toBeNull()
     expect(edit('Write', path.resolve('/elsewhere/file.ts'))).toBeNull()
+  })
+
+  it('leaves the evaluator to the driver in a loop session', () => {
+    const agent = (tool: string, subagent_type: string, loop: boolean) =>
+      evaluate(
+        { tool_name: tool, tool_input: { subagent_type, prompt: 'Score the diff' } },
+        { root, config, loop, checkFeatureList: () => ({ code: 0, out: '' }) },
+      )
+    expect(agent('Agent', 'harness:evaluator', true)?.decision).toBe('deny')
+    expect(agent('Task', 'evaluator', true)?.reason).toMatch(/driver runs the evaluator/)
+    expect(agent('Agent', 'harness:evaluator', false)).toBeNull()
+    expect(agent('Agent', 'Explore', true)).toBeNull()
+  })
+
+  it('routes subagent launches through the guard', () => {
+    const hooks = JSON.parse(
+      readFileSync(path.resolve(import.meta.dirname, '../plugin/hooks/hooks.json'), 'utf8'),
+    ) as { hooks: { PreToolUse: { matcher: string; hooks: { command: string }[] }[] } }
+    const guarded = hooks.hooks.PreToolUse.filter((h) =>
+      h.hooks.some((c) => c.command.includes('guard.mjs')),
+    ).flatMap((h) => h.matcher.split('|'))
+    expect(guarded).toEqual(expect.arrayContaining(['Agent', 'Task']))
   })
 
   it('normalises Windows paths and shell-case globs', () => {

@@ -90,6 +90,18 @@ export function evaluate(input, { root, config, loop, checkFeatureList }) {
     return null
   }
 
+  if (tool === 'Agent' || tool === 'Task') {
+    // The driver evaluates in its own session; overnight generators launched the evaluator
+    // themselves and idled on ScheduleWakeup until it answered, paying for the review twice.
+    if (loop && /^(harness:)?evaluator$/.test(String(ti.subagent_type ?? '')))
+      return {
+        decision: 'deny',
+        reason:
+          'the loop driver runs the evaluator in its own session after this one ends; finish the clock-out without it',
+      }
+    return null
+  }
+
   if (tool === 'Edit' || tool === 'Write' || tool === 'MultiEdit') {
     const file = typeof ti.file_path === 'string' ? ti.file_path : ''
     // Claude Code on Windows sends backslash paths; compare normalised repo-relative paths.

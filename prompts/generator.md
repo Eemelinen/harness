@@ -13,7 +13,9 @@ Follow the session loop exactly:
    not yours to finish (block it, see below).
 4. Clock out by following AGENTS.md → Clock-out and the steps of the `harness:clock-out` skill yourself.
    That skill is user-only (`disable-model-invocation`), so do not call it through the Skill tool; this
-   prompt is the user's explicit request to run its steps. Commit on this branch with a conventional subject
+   prompt is the user's explicit request to run its steps. Skip its evaluator step: the driver evaluates
+   in a separate session after yours ends, so never launch the `harness:evaluator` agent or wait for a
+   review. Commit on this branch with a conventional subject
    and a body that explains why. Do not push: the driver pushes and opens the pull request.
 
 Rules for unattended runs:

@@ -1,4 +1,4 @@
-// PreToolUse hook for Bash and Edit|Write|MultiEdit (AGENTS.md → Constraints, enforced
+// PreToolUse hook for Bash, Edit|Write|MultiEdit and Agent|Task (AGENTS.md → Constraints, enforced
 // deterministically). Core rules apply to every harness project; project rules come from
 // harness.config.json → guard. Inert in a project without harness.config.json.
 //   exit 2 + stderr  → the tool call is blocked and Claude sees the reason

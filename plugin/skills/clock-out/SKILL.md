@@ -17,6 +17,6 @@ Run the clock-out routine from AGENTS.md → Clock-out and Definition of done.
    - Rewrite Next Steps so a fresh session can start immediately.
    - For a long or multi-area session also add a handoff block at the top of `docs/harness/session-handoff.md`.
 6. `pnpm check` (and the feature's L2/L3 if they were not run in this session). Stop and report if red.
-7. Optional but recommended when a feature reaches `passing`: launch the `harness:evaluator` agent on the working tree. If the verdict is Revise or Block, address the findings before committing. (The loop driver runs the evaluator itself in a separate session; skip this step when `HARNESS_LOOP=1`.)
+7. When `HARNESS_LOOP=1`, skip this step: the loop driver runs the evaluator in its own session after yours, and the guard denies the agent. Otherwise, optional but recommended when a feature reaches `passing`: launch the `harness:evaluator` agent on the working tree. If the verdict is Revise or Block, address the findings before committing.
 8. Commit: one logical change, conventional-commit subject, body that explains why; include the state files and any doc updates in the same commit. The guard hook re-runs `pnpm harness:check` on `git commit`. Do not push in a driver-run session; the driver pushes and opens the PR.
 9. Confirm `pnpm harness:clean-state` exits 0 on the clean tree. Report the commit hash and the next best step.
