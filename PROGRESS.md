@@ -13,8 +13,8 @@ this file to change on every branch; keep that heading text exactly.
 - The repository runs its own loop: features come from `harness-retro` issues filed by project
   retros (docs/self-improvement.md). Merges that change a shipped path are released by
   `.github/workflows/release.yml` (docs/developing.md → Releasing); it needs the `RELEASE_TOKEN` secret.
-- Last verified: F-015 on this branch, `pnpm check` green on 2026-10-24.
-- Highest-priority unfinished feature: none (F-000…F-015 passing).
+- Last verified: F-017 on this branch, `pnpm check` green on 2026-10-24.
+- Highest-priority unfinished feature: none (F-000…F-017 passing).
 - Current blocker: none.
 
 ## Next Steps
@@ -33,8 +33,36 @@ this file to change on every branch; keep that heading text exactly.
 4. After F-015 is released, Metsävahti can add `"exceptNewOnBranch": true` to its
    `src/payload/migrations/*` rule (and Personal Finances to its migrations rule), so a driver-run
    session can fix the `down` order of a migration it generated (harness#20).
+5. After F-017 is released, start long-running loops detached (docs/how-it-works.md → Stopping the
+   loop: `setsid nohup pnpm harness:loop > loop.log 2>&1 &` or tmux). A loop that still ends with
+   its launcher now leaves an `aborted` row with `stopped by <signal>` in `runs.jsonl`.
 
 ## Session Log
+
+### Session 005 — 2026-10-24 (F-017, driver-run)
+
+- F-017 (retro issue #22): SIGINT, SIGTERM and SIGHUP share one handler, `stopHandler` in
+  `src/loop.ts`. The first signal logs `<signal>: stopping`, sends the session SIGINT (SIGTERM
+  after 30 s, as on wall-clock expiry) and the same signal to a restarted driver (`spawnTee` got
+  an `onSpawn` option for that). The attempt is recorded `aborted` with `stopped by <signal>`,
+  the loop notifies (`stopNotice`) and exits 128 + the signal number. A second signal ends the
+  session and exits at once. Implemented as proposed, with these choices:
+  - SIGINT changed too, for consistency: Ctrl-C now exits 130 instead of 0, notifies and escalates
+    to SIGTERM after 30 s. Not marked breaking: no flag or config key changed.
+  - A repeat within 2 s counts as the same signal. A terminal signals the whole process group
+    and pnpm forwards the signal again, so without the window one Ctrl-C could exit at once.
+  - The stop is checked after the evaluator and the safety review as well. Before this, a SIGINT
+    during the evaluator gave no verdict, so the next attempt started. An error thrown while
+    stopping (the merge wait) ends the loop through the stop path instead of crashing.
+  - A second signal exits without a `runs.jsonl` row (the handler doesn't know the attempt).
+  - Docs: the interrupted feature's branch stays, so a restarted loop skips it.
+    `--feature F-NNN` continues it in the same worktree. A retro-intake feature exists only on
+    its branch and has to be finished by hand.
+- Tests: the handler with stub children and fake timers (each signal, the grace, a repeat inside
+  the window, a second signal, passing the signal to a restarted driver), one real process that
+  ignores SIGINT, `signalExitCode`, `stopNotice`, and `spawnTee`'s `onSpawn`. Verification:
+  `pnpm harness:verify F-017`.
+- This changes the loop, so the PR waits for a human (reviewPaths).
 
 ### Session 004 — 2026-10-24 (F-015, driver-run)
 
