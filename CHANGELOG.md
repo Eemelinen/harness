@@ -4,6 +4,10 @@ Releases are git tags (`vX.Y.Z`). Projects pin the package and the plugin market
 tag; see [docs/developing.md](docs/developing.md). From v0.3.1 on, the release workflow writes each
 entry from the commit subjects since the previous tag.
 
+## v0.3.7 — 2026-10-24
+
+- Path guard rules can exempt files the feature branch added (#23)
+
 ## v0.3.6 — 2026-10-24
 
 - Keep a restarted driver's output for the evidence
