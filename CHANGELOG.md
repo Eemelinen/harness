@@ -4,6 +4,16 @@ Releases are git tags (`vX.Y.Z`). Projects pin the package and the plugin market
 tag; see [docs/developing.md](docs/developing.md). From v0.3.1 on, the release workflow writes each
 entry from the commit subjects since the previous tag.
 
+## v0.3.1 — 2026-10-24
+
+- Canary rollout of harness releases
+- Probation, rollback and re-test after a harness update
+- Stage harness rollouts and quarantine bad releases
+- Selftest, schema-based breaking detection, versioned runs
+- Hold release and update code for human review
+- Update project loops to the newest harness release
+- Release merges that change the package automatically
+
 ## v0.3.0 — 2026-10-24
 
 - **The harness can improve itself.** `harness retro` collects the signals where the harness got in
