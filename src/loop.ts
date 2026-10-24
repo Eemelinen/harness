@@ -42,7 +42,6 @@ import { parseArgs } from 'node:util'
 
 import {
   decideCiFix,
-  describeChecks,
   isFailed,
   logExcerpt,
   parseChecks,
@@ -51,6 +50,17 @@ import {
   type CiCheck,
 } from './ci'
 import { cleanState } from './clean-state'
+import {
+  abortMerge,
+  conflictStep,
+  conflictsWith,
+  fixerGaveUp,
+  fixerPrompt,
+  fixNote,
+  mergeDefaultBranch,
+  nextFixAttempt,
+  type FixTarget,
+} from './conflict'
 import { CONFIG_FILE, loadProject, worktreeRoot, type HarnessConfig, type Project } from './config'
 import { doctor, packageVersion } from './doctor'
 import { describeEvent, heartbeat, newStreamState } from './events'
@@ -779,6 +789,9 @@ async function runFeature(
       log(
         `with auto-merge, on a failed CI check: up to ${config.caps.maxCiFixAttempts} CI fixer session(s) in ${dir} (prompts/ci-fixer.md, same flags and env as the generator), evaluator, git push, wait again`,
       )
+      log(
+        `with auto-merge, on a conflict with ${defaultBranch()}: git merge ${remote()}/${defaultBranch()} in ${dir}; clean → ${config.project.init}, git push; conflicts → a fixer session (prompts/conflict-fixer.md), counted as a CI fix attempt`,
+      )
       return 'done'
     }
 
@@ -1242,17 +1255,28 @@ async function runSafetyReview(
 }
 
 type WaitResult =
-  { state: 'merged' } | { state: 'ci_failed'; failed: CiCheck[] } | { state: 'stalled' }
+  | { state: 'merged' }
+  | { state: 'ci_failed'; failed: CiCheck[] }
+  | { state: 'stalled' }
+  | { state: 'conflict' }
 
 /** With auto-merge, how long CI may report nothing new before the driver stops waiting. */
 const CI_STALL_MIN = 20
 
 /**
- * Polls until the PR merges. With auto-merge, returns early when CI failed (auto-merge never
- * fires on a red check) or reported nothing for CI_STALL_MIN minutes. Check results in `handled`
- * were already acted on and are ignored; a push or a rerun gives the new jobs new links.
+ * Polls until the PR merges. With auto-merge, returns early when the PR conflicts with its base
+ * (GitHub runs no CI then), CI failed (auto-merge never fires on a red check) or CI reported
+ * nothing for CI_STALL_MIN minutes. Only `mergeable: CONFLICTING` counts: GitHub reports UNKNOWN
+ * for a while after a push. With `head`, a conflict counts only once GitHub evaluated that commit.
+ * Check results in `handled` were already acted on and are ignored; a push or a rerun gives the
+ * new jobs new links.
  */
-async function waitForMerge(pr: string, auto: boolean, handled: Set<string>): Promise<WaitResult> {
+export async function waitForMerge(
+  pr: string,
+  auto: boolean,
+  handled: Set<string>,
+  head?: string,
+): Promise<WaitResult> {
   log(`waiting for ${auto ? 'CI and auto-merge' : 'a human merge'}: ${pr}`)
   const reported = new Set<string>()
   const waitStarted = Date.now()
@@ -1270,14 +1294,20 @@ async function waitForMerge(pr: string, auto: boolean, handled: Set<string>): Pr
         log(`${c.bucket === 'pass' ? '✓' : '✗'} CI ${c.name}: ${c.bucket}`)
       }
     }
-    const r = sh('gh', ['pr', 'view', pr, '--json', 'state,mergedAt'], { quiet: true })
+    const r = sh('gh', ['pr', 'view', pr, '--json', 'state,mergedAt,mergeable,headRefOid'], {
+      quiet: true,
+    })
     if (r.code === 0) {
-      const info = JSON.parse(r.out) as { state: string }
+      const info = JSON.parse(r.out) as { state: string; mergeable?: string; headRefOid?: string }
       if (info.state === 'MERGED') {
         log(`PR merged after ${Math.round((Date.now() - waitStarted) / 60000)} min: ${pr}`)
         return { state: 'merged' }
       }
       if (info.state === 'CLOSED') throw new Error(`PR ${pr} was closed without merging`)
+      if (auto && info.mergeable === 'CONFLICTING' && (!head || info.headRefOid === head)) {
+        log(`PR conflicts with its base branch: ${pr}`)
+        return { state: 'conflict' }
+      }
     }
     if (auto && pending === 0 && failed.length > 0) return { state: 'ci_failed', failed }
     if (auto && Date.now() - lastNews > CI_STALL_MIN * 60_000) return { state: 'stalled' }
@@ -1338,6 +1368,8 @@ function rerunFailed(failed: CiCheck[]): boolean {
  * driver passes the failed-job logs to a fixer session in the feature's worktree, re-checks
  * and re-evaluates its commit, pushes, and waits again, up to `caps.maxCiFixAttempts` sessions.
  * Cancelled jobs, and failures the fixer calls flaky without changing anything, are re-run once.
+ * A PR that conflicts with the default branch gets it merged in (src/conflict.ts): a clean merge is
+ * checked and pushed, conflicts go to a fixer session like a CI failure (prompts/conflict-fixer.md).
  * When nothing works the driver gives up on this PR only (giveUp()); the loop continues.
  */
 async function shepherdPr(run: PrRun): Promise<'merged' | 'blocked' | 'aborted'> {
@@ -1347,7 +1379,10 @@ async function shepherdPr(run: PrRun): Promise<'merged' | 'blocked' | 'aborted'>
   const handled = new Set<string>()
   const minutes = () => Math.round((Date.now() - run.started) / 60000)
   const base = { feature: id, attempt: run.attempt, pr, minutes: 0, costUsd: 0, turns: 0 }
+  const conflicts = conflictsWith(defaultBranch())
   let failed: CiCheck[] = []
+  /** Set while a merge of the default branch needs a fixer: what the fixer is told. */
+  let conflict: string | undefined
   let evidence = ''
   let context = ''
   let ciAttempt = 0
@@ -1355,11 +1390,38 @@ async function shepherdPr(run: PrRun): Promise<'merged' | 'blocked' | 'aborted'>
   let pushedHead = must('git', ['rev-parse', 'HEAD'], 'git rev-parse', dir)
 
   for (;;) {
-    if (failed.length === 0) {
-      const waited = await waitForMerge(pr, auto, handled)
+    if (failed.length === 0 && !conflict) {
+      const waited = await waitForMerge(pr, auto, handled, pushedHead)
       if (waited.state === 'merged') return 'merged'
       if (waited.state === 'stalled')
         return giveUp(run, `CI reported nothing new for ${CI_STALL_MIN} min`, evidence)
+      if (waited.state === 'conflict') {
+        log(`${pr} ${conflicts}: merging ${remote()}/${defaultBranch()} into ${branchFor(id)}`)
+        const merged = mergeDefaultBranch(
+          {
+            dir,
+            root: ROOT,
+            remote: remote(),
+            defaultBranch: defaultBranch(),
+            branch: branchFor(id),
+            check: ['bash', config.project.init],
+          },
+          log,
+        )
+        const step = conflictStep(merged, {
+          remote: remote(),
+          defaultBranch: defaultBranch(),
+          init: config.project.init,
+        })
+        if (step.action === 'give-up') return giveUp(run, step.reason, evidence)
+        log(step.log)
+        if (step.action === 'wait') pushedHead = step.head
+        else {
+          evidence = step.evidence
+          conflict = step.problem
+        }
+        continue
+      }
       failed = waited.failed
       for (const c of failed) handled.add(c.link)
       const names = failed.map((c) => c.name).join(', ')
@@ -1382,12 +1444,18 @@ async function shepherdPr(run: PrRun): Promise<'merged' | 'blocked' | 'aborted'>
       }
     }
     if (aborting) return 'aborted'
-    const names = failed.map((c) => c.name).join(', ')
-    if (ciAttempt >= max)
-      return giveUp(run, `CI still failing after ${max} fix attempt(s): ${names}`, evidence)
-    ciAttempt += 1
+    const names = conflict ? conflicts : failed.map((c) => c.name).join(', ')
+    const target = (): FixTarget => ({
+      attempt: ciAttempt,
+      max,
+      failed: names,
+      conflictWith: conflict === undefined ? undefined : defaultBranch(),
+    })
+    const next = nextFixAttempt(target())
+    if ('giveUp' in next) return giveUp(run, next.giveUp, evidence)
+    ciAttempt = next.attempt
 
-    const prompt = render(promptFile('ci-fixer.md'), {
+    const vars = {
       PROJECT_NAME: config.project.name,
       PROJECT_NOTES: projectNotes(project),
       FEATURE_ID: id,
@@ -1395,11 +1463,11 @@ async function shepherdPr(run: PrRun): Promise<'merged' | 'blocked' | 'aborted'>
       PR: pr,
       ATTEMPT: String(ciAttempt),
       MAX_ATTEMPTS: String(max),
-      FAILED_CHECKS: describeChecks(failed),
-      LOG_EXCERPT: evidence,
       BASE: `${remote()}/${defaultBranch()}`,
       CONTEXT: context ? `\nContext from the previous fix attempt:\n${context}\n` : '',
-    })
+    }
+    const fixer = fixerPrompt({ problem: conflict, failed, evidence })
+    const prompt = render(promptFile(fixer.file), { ...vars, ...fixer.vars })
     const before = must('git', ['rev-parse', 'HEAD'], 'git rev-parse', dir)
     const traceFile = path.join(ROOT, config.traceDir, `${id}-${stamp()}.ci-fix.jsonl`)
     log(
@@ -1436,19 +1504,22 @@ async function shepherdPr(run: PrRun): Promise<'merged' | 'blocked' | 'aborted'>
       newCommits,
       postCheckOk: check.ok,
       verdict,
-      rerunDone,
+      // A conflict has no jobs to re-run.
+      rerunDone: rerunDone || conflict !== undefined,
     })
     log(
       `fixer says ${verdict ? `${verdict.classification}: ${verdict.reason}` : 'nothing (no CI-FIX-VERDICT line)'}; ${newCommits} new commit(s), feature ${check.status} → ${decision}`,
     )
-    const note = (text: string) => `ci fix ${ciAttempt}/${max}: ${text}`.slice(0, 500)
+    const note = (text: string) => fixNote(target(), text)
+    const what = conflict ? 'merge resolution' : 'CI fix'
 
     if (decision === 'give-up') {
-      const reason =
-        check.status === 'blocked'
-          ? `the fixer blocked ${id}: ${check.feature?.notes.slice(-300) ?? ''}`
-          : `the fixer judged the failure out of scope: ${verdict?.reason ?? ''}`
-      return giveUp(run, note(reason), evidence, {
+      const reason = fixerGaveUp(target(), {
+        id,
+        blockedNotes: check.status === 'blocked' ? (check.feature?.notes ?? '') : undefined,
+        reason: verdict?.reason ?? '',
+      })
+      return giveUp(run, reason, evidence, {
         outcome: 'blocked',
         costUsd: cost,
         turns,
@@ -1489,20 +1560,22 @@ async function shepherdPr(run: PrRun): Promise<'merged' | 'blocked' | 'aborted'>
     }
 
     // A verified fix commit: review it like the feature itself before it can merge unattended.
-    const ciContext = `\nThis branch was accepted before, then CI failed on ${pr} (${names}). The commits after ${pushedHead.slice(0, 12)} fix that failure (\`git diff ${pushedHead}..HEAD\`). Check that they fix the root cause inside the feature's scope and that no test, assertion, coverage threshold or CI setting was weakened.\n`
+    const ciContext = conflict
+      ? `\nThis branch was accepted before, then ${pr} ${conflicts} after other work merged there. The commits after ${pushedHead.slice(0, 12)} merge ${remote()}/${defaultBranch()} into the branch and resolve that (\`git log --merges ${pushedHead}..HEAD\`, \`git show --remerge-diff <merge>\` for the resolution, \`git diff ${remote()}/${defaultBranch()}...HEAD\` for the branch's change as a whole). Check that both sides' changes are kept, no conflict marker is left, and no test, assertion, coverage threshold or CI setting was weakened.\n`
+      : `\nThis branch was accepted before, then CI failed on ${pr} (${names}). The commits after ${pushedHead.slice(0, 12)} fix that failure (\`git diff ${pushedHead}..HEAD\`). Check that they fix the root cause inside the feature's scope and that no test, assertion, coverage threshold or CI setting was weakened.\n`
     const ev = await runEvaluator(id, feature, dir, plugin, ciContext)
     const total = cost + ev.cost
     if (ev.verdict?.verdict === 'Accept') {
       // Auto-merge is armed: a fix that now needs review must not reach the PR unreviewed.
       const gate = await reviewGate(id, feature, dir, run.safety)
       if (gate.hold.length > 0)
-        return giveUp(run, `the CI fix needs a human review: ${gate.hold.join('; ')}`, evidence, {
-          costUsd: total + gate.cost,
-          turns,
-          trace: traceFile,
-          verdict: 'Accept',
-        })
-      if (!pushBranch(id, dir)) return giveUp(run, 'git push of the CI fix failed', evidence)
+        return giveUp(
+          run,
+          note(`the ${what} needs a human review: ${gate.hold.join('; ')}`),
+          evidence,
+          { costUsd: total + gate.cost, turns, trace: traceFile, verdict: 'Accept' },
+        )
+      if (!pushBranch(id, dir)) return giveUp(run, note(`git push of the ${what} failed`), evidence)
       pushedHead = must('git', ['rev-parse', 'HEAD'], 'git rev-parse', dir)
       record({
         ...fixRecord,
@@ -1513,14 +1586,15 @@ async function shepherdPr(run: PrRun): Promise<'merged' | 'blocked' | 'aborted'>
         minutes: minutes(),
         note: note(verdict?.reason ?? ''),
       })
-      log(`CI fix pushed (${newCommits} commit(s)); auto-merge is still armed`)
+      log(`${what} pushed (${newCommits} commit(s)); auto-merge is still armed`)
       failed = []
+      conflict = undefined
       context = ''
       continue
     }
     if (ev.verdict?.verdict === 'Block') {
       const reason =
-        `evaluator Block on the CI fix: ${ev.verdict.required_follow_up.join('; ') || ev.verdict.findings.map((f) => f.note).join('; ')}`.slice(
+        `evaluator Block on the ${what}: ${ev.verdict.required_follow_up.join('; ') || ev.verdict.findings.map((f) => f.note).join('; ')}`.slice(
           0,
           500,
         )
@@ -1528,7 +1602,7 @@ async function shepherdPr(run: PrRun): Promise<'merged' | 'blocked' | 'aborted'>
         cwd: dir,
         quiet: true,
       })
-      commitState(dir, `chore(harness): block ${id} after evaluator verdict on a CI fix`)
+      commitState(dir, `chore(harness): block ${id} after evaluator verdict on a ${what}`)
       return giveUp(run, note(reason), evidence, {
         outcome: 'blocked',
         verdict: 'Block',
@@ -1567,16 +1641,14 @@ function giveUp(
 ): 'blocked' {
   const { pr, id, dir } = run
   log(`giving up on ${pr}: ${reason}`)
-  const disabled = sh('gh', ['pr', 'merge', pr, '--disable-auto'], { cwd: dir, quiet: true })
-  if (disabled.code === 0) pushBranch(id, dir)
-  else log(`gh pr merge --disable-auto failed (${disabled.err}); not pushing unreviewed commits`)
+  const disabled = handBack({ pr, dir, remote: remote(), branch: branchFor(id) })
   const bodyFile = path.join(ROOT, config.traceDir, `${id}-ci-give-up.md`)
   writeFileSync(
     bodyFile,
     [
-      `The loop driver stopped trying to get CI green on this PR: ${reason}`,
+      `The loop driver stopped trying to get this PR merged: ${reason}`,
       '',
-      `Auto-merge is ${disabled.code === 0 ? 'disabled' : 'still armed (disabling failed)'}. Fix the branch (worktree \`${dir}\`), push, then merge or re-enable auto-merge. Fixer traces: \`${config.traceDir}/${id}-*.ci-fix.jsonl\`.`,
+      `Auto-merge is ${disabled ? 'disabled' : 'still armed (disabling failed)'}. Fix the branch (worktree \`${dir}\`), push, then merge or re-enable auto-merge. Fixer traces: \`${config.traceDir}/${id}-*.ci-fix.jsonl\`.`,
       ...(evidence
         ? [
             '',
@@ -1612,6 +1684,23 @@ function giveUp(
     `${id}: gave up on ${pr} — ${reason.slice(0, 200)}; the loop continues with independent features`,
   )
   return 'blocked'
+}
+
+/**
+ * giveUp's part in the worktree: abort an unfinished merge of the default branch (a fixer left it),
+ * so the worktree a human takes over is clean; disable auto-merge; then push the branch for
+ * inspection, but only once nothing unreviewed can merge by itself. True when auto-merge is off.
+ */
+export function handBack(s: { pr: string; dir: string; remote: string; branch: string }): boolean {
+  if (abortMerge(s.dir)) log(`aborted the unfinished merge in ${s.dir}`)
+  const disabled = sh('gh', ['pr', 'merge', s.pr, '--disable-auto'], { cwd: s.dir, quiet: true })
+  if (disabled.code !== 0) {
+    log(`gh pr merge --disable-auto failed (${disabled.err}); not pushing unreviewed commits`)
+    return false
+  }
+  const pushed = sh('git', ['push', '-u', s.remote, s.branch], { cwd: s.dir, quiet: true })
+  if (pushed.code !== 0) log(`git push failed: ${pushed.err}`)
+  return true
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1782,6 +1871,21 @@ function selftestRegressions(dir: string): Check[] {
 type PinResult = { state: 'merged' | 'waiting' | 'failed' | 'quarantined'; pr?: string }
 
 /**
+ * A pin PR that did not merge: it has no fixer, so a conflict, like red CI or a stall, goes to a
+ * human. Disables auto-merge and returns the reason pinPr reports.
+ */
+export function pinPrFailed(
+  pr: string,
+  waited: Exclude<WaitResult, { state: 'merged' }>,
+  base: string,
+): string {
+  sh('gh', ['pr', 'merge', pr, '--disable-auto'], { quiet: true })
+  if (waited.state === 'conflict') return conflictsWith(base)
+  if (waited.state === 'stalled') return `CI reported nothing for ${CI_STALL_MIN} min`
+  return 'CI failed'
+}
+
+/**
  * One PR that only moves the harness pins to `target`, from its own worktree, so a feature PR never
  * carries it. Moving forward, the new version's selftest must not regress against the installed
  * one, or the release is quarantined instead. Then doctor and `init.sh` with the L1 baseline run on
@@ -1922,9 +2026,9 @@ async function pinPr(
     if (armed.code !== 0) throw new Error(`gh pr merge --auto failed: ${armed.err}`)
     const waited = await waitForMerge(pr, true, new Set())
     if (waited.state === 'merged') return { state: 'merged', pr }
-    sh('gh', ['pr', 'merge', pr, '--disable-auto'], { quiet: true })
+    const reason = pinPrFailed(pr, waited, defaultBranch())
     notify(
-      `harness ${forward ? 'update' : 'rollback'} to v${target}: CI ${waited.state === 'stalled' ? `reported nothing for ${CI_STALL_MIN} min` : 'failed'}; auto-merge disabled, the loop stays on v${installed}: ${pr}`,
+      `harness ${forward ? 'update' : 'rollback'} to v${target}: ${reason}; auto-merge disabled, the loop stays on v${installed}: ${pr}`,
     )
     return { state: 'failed', pr }
   } catch (error) {

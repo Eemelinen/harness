@@ -13,8 +13,8 @@ this file to change on every branch; keep that heading text exactly.
 - The repository runs its own loop: features come from `harness-retro` issues filed by project
   retros (docs/self-improvement.md). Merges that change a shipped path are released by
   `.github/workflows/release.yml` (docs/developing.md → Releasing); it needs the `RELEASE_TOKEN` secret.
-- Last verified: F-015 on this branch, `pnpm check` green on 2026-10-24.
-- Highest-priority unfinished feature: none (F-000…F-015 passing).
+- Last verified: F-016 on this branch, `pnpm check` green on 2026-10-24.
+- Highest-priority unfinished feature: none (F-000…F-016 passing).
 - Current blocker: none.
 
 ## Next Steps
@@ -33,8 +33,64 @@ this file to change on every branch; keep that heading text exactly.
 4. After F-015 is released, Metsävahti can add `"exceptNewOnBranch": true` to its
    `src/payload/migrations/*` rule (and Personal Finances to its migrations rule), so a driver-run
    session can fix the `down` order of a migration it generated (harness#20).
+5. After F-016 is released, watch the first loop PR that conflicts with the default branch: the log
+   should show `merging origin/main into feat/F-NNN` instead of a 20-minute stall (harness#21).
 
 ## Session Log
+
+### Session 006 — 2026-10-24 (F-016 attempt 2, driver-run)
+
+- The evaluator's Revise on attempt 1: the shepherdPr conflict path, pinPr's conflict outcome and
+  giveUp's merge abort had no test. Chose the evaluator's second option, pure decision functions,
+  over driving shepherdPr itself (it needs the driver's module state, `claude` sessions, the
+  evaluator and the merge gate). The conflict path in shepherdPr is now glue around
+  `src/conflict.ts`: `conflictStep` (merge result → wait on the pushed head / fix with PROBLEM /
+  give up), `nextFixAttempt` (a conflict uses the `caps.maxCiFixAttempts` budget), `fixerPrompt`
+  (conflict-fixer.md vs ci-fixer.md), `fixNote` and `fixerGaveUp`. giveUp's worktree part is
+  `handBack` (abort the merge, disable auto-merge, push) and pinPr's failure is `pinPrFailed`, both
+  exported from `src/loop.ts` and tested with `gh` (and `claude`) stubbed on PATH.
+- Give-up reasons after a conflict fixer session now start with "conflicts with <default branch>:
+  fix N/M: …" (attempt 1 had "ci fix N/M: conflicts with …"); the review-hold and push-failure
+  give-ups after a fixer session carry the same note prefix (for CI: "ci fix N/M: …"). With
+  `caps.maxCiFixAttempts` 0 a conflict reads "no fixer session may resolve it".
+- Tests (`tests/conflict.test.ts`): a clean merge yields `wait` on the pushed head; conflicts reach
+  the conflict-fixer prompt with the files in PROBLEM; a clean merge failing L1 goes to the same
+  fixer; the budget and every conflict give-up reason; `handBack` aborts the merge before
+  `gh pr merge --disable-auto` (the stub records the worktree state) and pushes only when that
+  succeeded; `pinPrFailed` disables auto-merge, reports "conflicts with main", runs no `claude`.
+  A mutation check (handBack without the abort) fails the test. docs/how-it-works.md lists every
+  give-up case of the conflict path. Verification: `pnpm harness:verify F-016` → pass (commit
+  7d454c1).
+
+### Session 005 — 2026-10-24 (F-016, driver-run)
+
+- F-016 (retro issue #21): `waitForMerge()` reads `mergeable` and `headRefOid` in its `gh pr view`
+  poll and, with auto-merge, returns `conflict` at once on `CONFLICTING` (UNKNOWN is ignored). A
+  conflict counts only for the head the driver pushed, so a stale answer right after a push does not
+  trigger a second merge. `shepherdPr()` calls `mergeDefaultBranch()` (new `src/conflict.ts`):
+  fetch, fast-forward the driver checkout's default branch (so the merge gate and post-check diff
+  against the current one), `git merge origin/<default>` in the worktree. Clean → L1, push, keep
+  waiting. Conflicts → the merge stays in progress and a fixer session gets
+  `prompts/conflict-fixer.md` (keep both sides, re-verify, commit the merge); it counts as a CI-fix
+  attempt and goes through the same post-check, evaluator and merge gate. Give-up reasons read
+  "conflicts with <default branch>: …", and `giveUp()` aborts an unfinished merge. `pinPr` disables
+  auto-merge and reports "conflicts with <default branch>" without a fixer.
+- Deviation from the spec: it names `config.project.check` as L1, but that key does not exist. The
+  driver runs `bash <project.init>` instead, as `pinPr` already does for its L1 baseline: `init.sh`
+  installs the merged dependencies (main may have changed the lockfile) and then runs L1. No config
+  key was added.
+- Two choices the spec left open: a clean merge whose L1 fails goes to the same fixer session (with
+  the output tail) instead of giving up; and a clean merge is pushed without the evaluator, because
+  main's side was reviewed already and the branch's own change is unchanged. Conflicts are acted on
+  only with auto-merge, like red CI; a PR waiting for a human merge is left to the human.
+- Tests (`tests/conflict.test.ts`): against a bare remote, a driver checkout, a feature worktree and a
+  second clone — clean merge pushed and the default branch fast-forwarded, conflicting merge left in
+  progress with its files and then aborted, clean merge with failing L1 kept unpushed, and the
+  give-up paths (branch already contains main, fetch fails). `waitForMerge` with `gh` stubbed on
+  PATH: CONFLICTING → conflict at once, UNKNOWN keeps waiting, a conflict for an older head is
+  ignored, no conflict without auto-merge. `shepherdPr` itself still has no unit test (it needs
+  the driver's module state and sessions). Verification: `pnpm harness:verify F-016`.
+- This changes the loop and a prompt, so the PR waits for a human (reviewPaths).
 
 ### Session 004 — 2026-10-24 (F-015, driver-run)
 
