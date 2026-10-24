@@ -4,7 +4,14 @@ import path from 'node:path'
 
 import { describe, expect, it } from 'vitest'
 
-import { mergeResult, planUpdate, pluginDir, queueEmptyNotice, readCarry } from '../src/loop'
+import {
+  mergeResult,
+  planUpdate,
+  pluginDir,
+  queueEmptyNotice,
+  readCarry,
+  withHarnessVersion,
+} from '../src/loop'
 
 function dir(name: string, pkg: object) {
   const root = mkdtempSync(path.join(tmpdir(), `harness-${name}-`))
@@ -141,5 +148,17 @@ describe('readCarry', () => {
     expect(readCarry(undefined)).toEqual(empty)
     expect(readCarry('{')).toEqual(empty)
     expect(readCarry('{"retros":2}')).toEqual({ ...empty, retros: 2 })
+  })
+})
+
+describe('withHarnessVersion', () => {
+  it('stamps a run record with the harness version unless it has one', () => {
+    expect(withHarnessVersion({ feature: 'F-001' }, '0.3.1')).toEqual({
+      feature: 'F-001',
+      harness: '0.3.1',
+    })
+    expect(withHarnessVersion({ feature: 'F-001', harness: '0.3.0' }, '0.3.1').harness).toBe(
+      '0.3.0',
+    )
   })
 })

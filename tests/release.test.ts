@@ -6,6 +6,7 @@ import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
+  breakingSchemaChanges,
   changelogEntry,
   insertEntry,
   nextVersion,
@@ -28,8 +29,75 @@ describe('nextVersion', () => {
     expect(nextVersion('1.2.3', [commit('refactor(config)!: rename')])).toBe('2.0.0')
   })
 
+  it('bumps the minor number for a schema break while 0.x', () => {
+    expect(nextVersion('0.3.4', [commit('feat(F-009): x')], ['removes `a`'])).toBe('0.4.0')
+  })
+
   it('rejects a version it cannot bump', () => {
     expect(() => nextVersion('1.0.0-rc.1', [])).toThrow(/not X.Y.Z/)
+  })
+})
+
+describe('breakingSchemaChanges', () => {
+  const schema = (extra: object = {}) => ({
+    type: 'object',
+    properties: {
+      merge: { default: 'wait', type: 'string', enum: ['wait', 'auto', 'none'] },
+      update: {
+        default: {},
+        type: 'object',
+        properties: { auto: { default: false, type: 'boolean' } },
+      },
+      generator: {
+        type: 'object',
+        properties: { model: { type: 'string' } },
+        required: ['model'],
+      },
+      services: {
+        anyOf: [{ type: 'object', properties: { up: { type: 'string' } } }, { type: 'null' }],
+      },
+      tags: { type: 'array', items: { type: 'string', enum: ['a', 'b'] } },
+      ...extra,
+    },
+  })
+
+  it('finds nothing in an additive change', () => {
+    expect(
+      breakingSchemaChanges(schema(), schema({ added: { type: 'string', default: 'x' } })),
+    ).toEqual([])
+  })
+
+  it('names removed keys, new required keys, changed defaults and narrowed enums', () => {
+    const after = schema()
+    const props = after.properties as Record<string, Record<string, unknown>>
+    delete (props.update!.properties as Record<string, unknown>).auto
+    props.generator!.required = ['model', 'effort']
+    props.merge = { default: 'auto', type: 'string', enum: ['wait', 'auto'] }
+    props.services = { type: 'null' }
+    props.tags = { type: 'array', items: { type: 'string', enum: ['a'] } }
+    expect(breakingSchemaChanges(schema(), after)).toEqual([
+      'changes the default of `merge` from "wait" to "auto"',
+      'removes "none" from `merge`',
+      'removes `update.auto`',
+      'requires `generator.effort`',
+      'removes `services.up`',
+      'removes "b" from `tags[]`',
+    ])
+  })
+
+  it('finds no break between the committed schema and itself', () => {
+    const committed = JSON.parse(
+      readFileSync(
+        path.resolve(import.meta.dirname, '../schema/harness.config.schema.json'),
+        'utf8',
+      ),
+    )
+    expect(breakingSchemaChanges(committed, committed)).toEqual([])
+    const narrowed = structuredClone(committed)
+    narrowed.properties.merge.default = 'auto'
+    expect(breakingSchemaChanges(committed, narrowed)).toEqual([
+      'changes the default of `merge` from "wait" to "auto"',
+    ])
   })
 })
 
@@ -69,6 +137,9 @@ describe('changelog', () => {
       ].join('\n'),
     )
     expect(changelogEntry('0.3.2', 'd', [commit('docs: only')])).toContain('- Maintenance.')
+    expect(changelogEntry('0.4.0', 'd', [commit('feat: x')], ['removes `a`'])).toBe(
+      '## v0.4.0 — d\n\n- Breaking: the config schema removes `a`\n- X\n',
+    )
   })
 
   it('inserts the entry before the newest release and keeps the intro', () => {

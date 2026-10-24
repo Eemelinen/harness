@@ -47,6 +47,12 @@ this file to change on every branch; keep that heading text exactly.
   alternative; it was rejected because `.claude/settings.json` is in reviewPaths, so every feature
   PR would wait for a human. Verification: `pnpm harness:verify F-005`; `harness update --check`
   run against personal-finances (read-only) found v0.3.0 as newest.
+- F-006 (rollout safety, part 1 of 3): `harness selftest` runs the installed harness against a
+  project. The guard must block its core cases and allow the project's `allowedTools` and
+  verification commands, the hooks must exit cleanly, and doctor must pass. It's part of `pnpm check`
+  here. All three projects passed it read-only. The release script now reads breaking changes from
+  the config schema diff, because loop PR titles never carry `!`. Run records carry the harness
+  version. Verification: `pnpm harness:verify F-006`.
 - `src/update.ts` and `scripts/release.ts` were added to this repository's reviewPaths: one decides
   which update PRs skip a project's merge gate, the other runs with a token that can push to main.
 - Known risk: neither the release workflow nor a real update-and-restart has run yet. They need

@@ -44,7 +44,8 @@ Both end in the same layout. `X.Y.Z` below is the release you install; both pins
    "harness:loop": "harness loop",
    "harness:report": "harness report",
    "harness:doctor": "harness doctor",
-   "harness:update": "harness update"
+   "harness:update": "harness update",
+   "harness:selftest": "harness selftest"
    ```
 
    lint-staged: `'feature_list.json': ['harness check']`.

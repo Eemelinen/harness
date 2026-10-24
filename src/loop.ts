@@ -594,12 +594,21 @@ interface RunRecord {
   minutes: number
   trace: string
   note?: string
+  /** The harness version the run used, so a regression can be traced to its release. */
+  harness?: string
 }
 
 function record(rec: RunRecord) {
   const file = path.join(ROOT, config.runsLog)
   mkdirSync(path.dirname(file), { recursive: true })
-  appendFileSync(file, `${JSON.stringify(rec)}\n`)
+  appendFileSync(file, `${JSON.stringify(withHarnessVersion(rec))}\n`)
+}
+
+export function withHarnessVersion<T extends object>(
+  rec: T & { harness?: string },
+  version: string = packageVersion(),
+): T & { harness: string } {
+  return { ...rec, harness: rec.harness ?? version }
 }
 
 function report() {
@@ -612,10 +621,10 @@ function report() {
     .split('\n')
     .filter(Boolean)
     .map((l) => JSON.parse(l) as RunRecord)
-  console.log('when              feature attempt outcome  verdict  turns  cost   min  pr')
+  console.log('when              feature attempt outcome  verdict  turns  cost   min  harness  pr')
   for (const r of rows) {
     console.log(
-      `${r.ts.slice(0, 16).replace('T', ' ')} ${r.feature}   ${String(r.attempt).padEnd(7)} ${r.outcome.padEnd(8)} ${(r.verdict ?? '-').padEnd(8)} ${String(r.turns).padStart(5)}  $${r.costUsd.toFixed(2).padStart(5)} ${String(r.minutes).padStart(4)}  ${r.pr ?? ''}`,
+      `${r.ts.slice(0, 16).replace('T', ' ')} ${r.feature}   ${String(r.attempt).padEnd(7)} ${r.outcome.padEnd(8)} ${(r.verdict ?? '-').padEnd(8)} ${String(r.turns).padStart(5)}  $${r.costUsd.toFixed(2).padStart(5)} ${String(r.minutes).padStart(4)}  ${(r.harness ?? '?').padEnd(7)}  ${r.pr ?? ''}`,
     )
   }
   const total = rows.reduce((s, r) => s + r.costUsd, 0)
@@ -628,9 +637,9 @@ function report() {
 
 const promptFile = (name: string) => readFileSync(path.join(PACKAGE_ROOT, 'prompts', name), 'utf8')
 
-function projectNotes(): string {
-  const notesFile = config.prompts.generatorNotes
-  const notes = notesFile ? readFileSync(path.join(ROOT, notesFile), 'utf8').trim() : ''
+function projectNotes(p: Project): string {
+  const notesFile = p.config.prompts.generatorNotes
+  const notes = notesFile ? readFileSync(p.resolve(notesFile), 'utf8').trim() : ''
   return notes ? `\nProject notes (\`${notesFile}\`):\n\n${notes}\n` : ''
 }
 
@@ -661,10 +670,11 @@ function sessionArgs(prompt: string, plugin: string): string[] {
   ]
 }
 
-function generatorTemplate(): string {
+/** The generator prompt of `p` with the per-attempt placeholders left in (also `harness selftest`). */
+export function generatorTemplate(p: Project = project): string {
   return render(promptFile('generator.md'), {
-    PROJECT_NAME: config.project.name,
-    PROJECT_NOTES: projectNotes(),
+    PROJECT_NAME: p.config.project.name,
+    PROJECT_NOTES: projectNotes(p),
     FEATURE_ID: '{{FEATURE_ID}}',
     FEATURE_TITLE: '{{FEATURE_TITLE}}',
     ATTEMPT: '{{ATTEMPT}}',
@@ -1346,7 +1356,7 @@ async function shepherdPr(run: PrRun): Promise<'merged' | 'blocked' | 'aborted'>
 
     const prompt = render(promptFile('ci-fixer.md'), {
       PROJECT_NAME: config.project.name,
-      PROJECT_NOTES: projectNotes(),
+      PROJECT_NOTES: projectNotes(project),
       FEATURE_ID: id,
       FEATURE_TITLE: feature.title,
       PR: pr,

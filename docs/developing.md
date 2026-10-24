@@ -9,6 +9,7 @@ keeps an experiment in one project from breaking the others.
 pnpm install
 pnpm check          # typecheck, format:check, unit tests
 pnpm schema         # after changing src/config.ts; tests fail while the schema file is stale
+pnpm harness:selftest   # prompts, guard and hooks run against this repository (part of check)
 ```
 
 The plugin hooks (`plugin/hooks/*.mjs`) must stay dependency-free: they run from Claude Code's
@@ -41,7 +42,10 @@ runs `scripts/release.ts` on the commits since the last `v*` tag:
 - **Version.** Every release bumps the patch number. A breaking change (a config key removed or
   renamed, a changed CLI flag) bumps the minor number while the version is 0.x and the major number
   after that; mark it with `!` in the commit subject (`feat(F-012)!: …`) or a `BREAKING CHANGE:`
-  footer. Squash merges keep the PR title as the subject, so put the `!` there.
+  footer. Squash merges keep the PR title as the subject, so put the `!` there. Loop PRs never
+  carry the `!`, so the script also compares `schema/harness.config.schema.json` with the last
+  tag's: a removed key, a newly required key, a changed or dropped default or a removed enum value
+  makes the release breaking, and the changelog says which.
 - **Changelog.** One `CHANGELOG.md` bullet per commit subject (without its `type(scope):`
   prefix); `docs`, `test`, `ci` and `style` commits are left out. The same lines become the GitHub
   release notes.

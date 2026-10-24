@@ -29,7 +29,7 @@
   },
   "packageManager": "pnpm@10.15.0",
   "scripts": {
-    "check": "pnpm typecheck && pnpm format:check && pnpm harness:check && pnpm test",
+    "check": "pnpm typecheck && pnpm format:check && pnpm harness:check && pnpm test && pnpm harness:selftest",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -43,7 +43,8 @@
     "harness:loop": "node bin/harness.mjs loop",
     "harness:report": "node bin/harness.mjs report",
     "harness:retro": "node bin/harness.mjs retro",
-    "harness:doctor": "node bin/harness.mjs doctor"
+    "harness:doctor": "node bin/harness.mjs doctor",
+    "harness:selftest": "node bin/harness.mjs selftest"
   },
   "dependencies": {
     "tsx": "^4.23.13",

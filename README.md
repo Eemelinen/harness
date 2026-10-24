@@ -42,18 +42,19 @@ matches the package. `pnpm harness:doctor` fails when the two pins differ.
 The project's `package.json` maps `pnpm harness:<x>` to `harness <x>`, so docs, permissions and
 evidence lines name `pnpm harness:*`.
 
-| Command                                                                    | What it does                                                                                      |
-| -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| `harness check [file]`                                                     | Validate `feature_list.json` (WIP=1, evidence before `passing`, dependencies, configured fields). |
-| `harness feature next\|show\|list\|activate\|block\|unblock\|attempt`      | Feature state transitions; the only way a status changes.                                         |
-| `harness verify F-NNN [--dry-run]`                                         | Run the feature's layers in order, record evidence, set `passing`.                                |
-| `harness clean-state [--quick] [--allow-state-dirty] [--require-terminal]` | The clock-out gate.                                                                               |
-| `harness loop [--once] [--feature F-NNN] [--dry-run]`                      | The unattended driver.                                                                            |
-| `harness report`                                                           | Past driver runs.                                                                                 |
-| `harness retro [--dry-run] [--signals] [--since <time>]`                   | Look back at the loop's runs and file harness problems as issues the loop builds.                 |
-| `harness doctor`                                                           | Is the project wired correctly (config, plugin pin = package version, required files, leftovers). |
-| `harness update [--to X.Y.Z] [--check]`                                    | Move to the newest harness release (pins, then doctor); `update.auto` does it from the loop.      |
-| `harness config`                                                           | Print the resolved configuration with defaults.                                                   |
+| Command                                                                    | What it does                                                                                               |
+| -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `harness check [file]`                                                     | Validate `feature_list.json` (WIP=1, evidence before `passing`, dependencies, configured fields).          |
+| `harness feature next\|show\|list\|activate\|block\|unblock\|attempt`      | Feature state transitions; the only way a status changes.                                                  |
+| `harness verify F-NNN [--dry-run]`                                         | Run the feature's layers in order, record evidence, set `passing`.                                         |
+| `harness clean-state [--quick] [--allow-state-dirty] [--require-terminal]` | The clock-out gate.                                                                                        |
+| `harness loop [--once] [--feature F-NNN] [--dry-run]`                      | The unattended driver.                                                                                     |
+| `harness report`                                                           | Past driver runs.                                                                                          |
+| `harness retro [--dry-run] [--signals] [--since <time>]`                   | Look back at the loop's runs and file harness problems as issues the loop builds.                          |
+| `harness doctor`                                                           | Is the project wired correctly (config, plugin pin = package version, required files, leftovers).          |
+| `harness update [--to X.Y.Z] [--check]`                                    | Move to the newest harness release (pins, then doctor); `update.auto` does it from the loop.               |
+| `harness selftest [--json]`                                                | Does the installed harness still work here: prompts, guard core rules and project commands, hooks, doctor. |
+| `harness config`                                                           | Print the resolved configuration with defaults.                                                            |
 
 ## Requirements
 

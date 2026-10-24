@@ -93,6 +93,45 @@
       "evidence": ["2026-10-24 pnpm check → pass (working tree on da91493)"],
       "attempts": 0,
       "notes": "Requested 2026-10-24: updating every project by hand in the middle of a loop is the bottleneck once releases are automatic (F-004). Breaking releases need update.allowBreaking."
+    },
+    {
+      "id": "F-006",
+      "priority": 6,
+      "area": "release",
+      "title": "Selftest, schema-based breaking detection and the harness version on run records",
+      "user_visible_behavior": "harness selftest checks a project with the installed harness: config and feature list load, prompts render, the evaluator agent parses, the guard still blocks its core cases and still allows the project allowedTools and verification commands, the lifecycle hooks exit cleanly, doctor is ok; it runs in the harness repository check. The release script treats a removed, newly required, re-defaulted or narrowed config key as a breaking change. Every runs.jsonl record names its harness version and harness report shows it.",
+      "status": "passing",
+      "depends_on": ["F-005"],
+      "verification": ["L1: pnpm check"],
+      "evidence": ["2026-10-24 pnpm check → pass (working tree on bbc9a95)"],
+      "attempts": 0,
+      "notes": "Requested 2026-10-24: automatic updates must not let a harness regression spread. Loop PR titles never carry !, so breaking changes must be found from the schema."
+    },
+    {
+      "id": "F-007",
+      "priority": 7,
+      "area": "loop",
+      "title": "Staged rollout and quarantine of harness releases",
+      "user_visible_behavior": "With update.auto the loop takes the newest release that is at least update.minAgeHours old (default 6, 0 for a canary), not a draft or prerelease and not quarantined. A version is quarantined by an open or completed harness-quarantine issue in the harness repository; closing it as not planned lifts it. A project on a quarantined version moves to the newest eligible release or back to an older one. The update PR runs the old and the new selftest; a check that regresses quarantines the release with the evidence instead of opening the PR.",
+      "status": "not_started",
+      "depends_on": ["F-006"],
+      "verification": ["L1: pnpm check"],
+      "evidence": [],
+      "attempts": 0,
+      "notes": "Requested 2026-10-24: catch a bad release in one project and keep it from reaching the others."
+    },
+    {
+      "id": "F-008",
+      "priority": 8,
+      "area": "loop",
+      "title": "Probation, rollback and re-test after a harness update",
+      "user_visible_behavior": "The first feature after an update runs on probation. If it fails, is blocked or the driver errors, its branch is kept as harness/probation-vX-F-NNN and removed from the queue, the project rolls back to the previous release through a pin-only PR and re-runs the feature there. Passing on the old version quarantines the release with both outcomes; failing again clears it. The previous driver supervises the restarted one and rolls back and quarantines when it exits with an error before a probation result.",
+      "status": "not_started",
+      "depends_on": ["F-007"],
+      "verification": ["L1: pnpm check"],
+      "evidence": [],
+      "attempts": 0,
+      "notes": "Requested 2026-10-24: a harness regression must not burn feature attempts and must be traced to the release that caused it."
     }
   ]
 }

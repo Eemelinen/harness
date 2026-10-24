@@ -85,6 +85,7 @@
     "Bash(pnpm harness:verify *)",
     "Bash(pnpm harness:clean-state*)",
     "Bash(pnpm harness:doctor)",
+    "Bash(pnpm harness:selftest)",
     "Bash(pnpm exec prettier*)",
     "Bash(pnpm exec tsc*)",
     "Bash(FAST=1 ./init.sh)",

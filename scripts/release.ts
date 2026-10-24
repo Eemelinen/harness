@@ -5,10 +5,12 @@
  *
  * A release happens only when the commits change a shipped path (package.json `files`, or
  * package.json itself): docs, tests and state files reach no project. Every release bumps the
- * patch number; a breaking change (`type!:` or a `BREAKING CHANGE:` footer) bumps the minor number
- * while the version is 0.x and the major number after that.
+ * patch number; a breaking change bumps the minor number while the version is 0.x and the major
+ * number after that. A change is breaking when a commit says so (`type!:` or a `BREAKING CHANGE:`
+ * footer) or when the config schema breaks configs that worked before (breakingSchemaChanges):
+ * loop PRs are titled `feat(F-NNN): …` and never carry the `!`.
  */
-import { appendFileSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
@@ -30,12 +32,80 @@ export function isBreaking(commit: Commit): boolean {
   return CONVENTIONAL.exec(commit.subject)?.[3] === '!' || /^BREAKING[ -]CHANGE:/m.test(commit.body)
 }
 
-export function nextVersion(current: string, commits: Commit[]): string {
+export function nextVersion(
+  current: string,
+  commits: Commit[],
+  schemaBreaks: string[] = [],
+): string {
   const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(current)
   if (!match) throw new Error(`package.json version ${current} is not X.Y.Z`)
   const [major, minor, patch] = match.slice(1).map(Number) as [number, number, number]
-  if (!commits.some(isBreaking)) return `${major}.${minor}.${patch + 1}`
+  if (!commits.some(isBreaking) && schemaBreaks.length === 0)
+    return `${major}.${minor}.${patch + 1}`
   return major === 0 ? `0.${minor + 1}.0` : `${major + 1}.0.0`
+}
+
+type Json = Record<string, unknown>
+
+const obj = (value: unknown): Json =>
+  value && typeof value === 'object' && !Array.isArray(value) ? (value as Json) : {}
+
+interface SchemaNode {
+  default?: unknown
+  enum?: unknown[]
+  required?: string[]
+}
+
+/** Every path of a JSON schema (`a.b`, `a[]`, `a.*`) with its default, enum values and required keys. */
+function flattenSchema(schema: unknown, at = '', out = new Map<string, SchemaNode>()) {
+  const s = obj(schema)
+  const node = out.get(at) ?? {}
+  if ('default' in s) node.default = s.default
+  if (Array.isArray(s.enum)) node.enum = [...(node.enum ?? []), ...s.enum]
+  if (Array.isArray(s.required))
+    node.required = [...new Set([...(node.required ?? []), ...s.required])]
+  out.set(at, node)
+  for (const [key, value] of Object.entries(obj(s.properties)))
+    flattenSchema(value, at ? `${at}.${key}` : key, out)
+  if (s.items) flattenSchema(s.items, `${at}[]`, out)
+  if (s.additionalProperties && typeof s.additionalProperties === 'object')
+    flattenSchema(s.additionalProperties, `${at}.*`, out)
+  for (const key of ['anyOf', 'oneOf', 'allOf'])
+    for (const variant of Array.isArray(s[key]) ? s[key] : []) flattenSchema(variant, at, out)
+  return out
+}
+
+/**
+ * Why a config that was valid under `before` may fail or behave differently under `after`: a key
+ * removed, a key newly required, a default changed or dropped, an enum value removed.
+ */
+export function breakingSchemaChanges(before: unknown, after: unknown): string[] {
+  const b = flattenSchema(before)
+  const a = flattenSchema(after)
+  const reasons: string[] = []
+  const name = (at: string) => `\`${at || '(root)'}\``
+  for (const [at, old] of b) {
+    const now = a.get(at)
+    if (!now) {
+      reasons.push(`removes ${name(at)}`)
+      continue
+    }
+    for (const key of now.required ?? [])
+      if (!(old.required ?? []).includes(key))
+        reasons.push(`requires ${name(at ? `${at}.${key}` : key)}`)
+    if ('default' in old && JSON.stringify(old.default) !== JSON.stringify(now.default))
+      reasons.push(
+        'default' in now
+          ? `changes the default of ${name(at)} from ${JSON.stringify(old.default)} to ${JSON.stringify(now.default)}`
+          : `drops the default of ${name(at)}`,
+      )
+    const removed = (old.enum ?? []).filter(
+      (v) => !(now.enum ?? []).some((w) => JSON.stringify(w) === JSON.stringify(v)),
+    )
+    if (old.enum && removed.length > 0)
+      reasons.push(`removes ${removed.map((v) => JSON.stringify(v)).join(', ')} from ${name(at)}`)
+  }
+  return reasons
 }
 
 /** Does the diff touch something a project installs? */
@@ -47,7 +117,12 @@ export function releasableChanges(changedFiles: string[], shipped: string[]): bo
 }
 
 /** One bullet per listed commit, its subject without the `type(scope):` prefix. */
-export function changelogEntry(version: string, date: string, commits: Commit[]): string {
+export function changelogEntry(
+  version: string,
+  date: string,
+  commits: Commit[],
+  schemaBreaks: string[] = [],
+): string {
   const lines = commits.flatMap((c) => {
     const m = CONVENTIONAL.exec(c.subject)
     if (m && (UNLISTED.has(m[1]!) || (m[1] === 'chore' && /^release\b/.test(m[4]!)))) return []
@@ -56,9 +131,9 @@ export function changelogEntry(version: string, date: string, commits: Commit[])
       `- ${text.charAt(0).toUpperCase()}${text.slice(1)}${isBreaking(c) ? ' (breaking)' : ''}`,
     ]
   })
-  return [`## v${version} — ${date}`, '', ...(lines.length ? lines : ['- Maintenance.']), ''].join(
-    '\n',
-  )
+  const breaks = schemaBreaks.map((r) => `- Breaking: the config schema ${r}`)
+  const all = [...breaks, ...lines]
+  return [`## v${version} — ${date}`, '', ...(all.length ? all : ['- Maintenance.']), ''].join('\n')
 }
 
 /** The entry goes before the newest release; the intro above it stays. */
@@ -95,8 +170,17 @@ export function release(
     .filter(Boolean)
   if (!releasableChanges(changed, pkg.files ?? [])) return undefined
 
-  const version = nextVersion(pkg.version, commits)
-  const entry = changelogEntry(version, date, commits)
+  const schemaFile = 'schema/harness.config.schema.json'
+  const before = sh('git', ['show', `${tag}:${schemaFile}`], { cwd: root, quiet: true })
+  const schemaBreaks =
+    before.code === 0 && existsSync(path.join(root, schemaFile))
+      ? breakingSchemaChanges(
+          JSON.parse(before.out),
+          JSON.parse(readFileSync(path.join(root, schemaFile), 'utf8')),
+        )
+      : []
+  const version = nextVersion(pkg.version, commits, schemaBreaks)
+  const entry = changelogEntry(version, date, commits, schemaBreaks)
   writeFileSync(
     pkgFile,
     readFileSync(pkgFile, 'utf8').replace(/"version": "[^"]*"/, `"version": "${version}"`),

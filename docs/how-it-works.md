@@ -126,17 +126,18 @@ rely on `allowedTools` alone.
 
 **Commands**
 
-| Command                                   | What it does                                                                                              |
-| ----------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `pnpm harness:loop --dry-run --no-docker` | Prints the worktree commands and the exact `claude` invocations for the next ready feature; runs nothing. |
-| `pnpm harness:loop --once`                | One feature end to end, then stops. Use this for the first runs.                                          |
-| `pnpm harness:loop --feature F-020`       | This feature only (it must be ready and unattended-capable).                                              |
-| `pnpm harness:loop`                       | Loop until nothing is ready, a stop condition hits, or Ctrl-C (finishes the current session first).       |
-| `--auto-merge`                            | `gh pr merge --auto --squash --delete-branch` for this run.                                               |
-| `--no-wait`                               | Do not wait for the merge; continue with features that do not depend on the open PR.                      |
-| `pnpm harness:report`                     | Table of past runs (feature, attempt, outcome, verdict, turns, cost, PR).                                 |
-| `pnpm harness:update [--check]`           | Move this checkout to the newest harness release (`--to X.Y.Z` for another one; `--check` only reports).  |
-| `pnpm harness:feature list`               | Queue overview with `[ready]` / `[ready, human-only]` markers.                                            |
+| Command                                   | What it does                                                                                                                                                              |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm harness:loop --dry-run --no-docker` | Prints the worktree commands and the exact `claude` invocations for the next ready feature; runs nothing.                                                                 |
+| `pnpm harness:loop --once`                | One feature end to end, then stops. Use this for the first runs.                                                                                                          |
+| `pnpm harness:loop --feature F-020`       | This feature only (it must be ready and unattended-capable).                                                                                                              |
+| `pnpm harness:loop`                       | Loop until nothing is ready, a stop condition hits, or Ctrl-C (finishes the current session first).                                                                       |
+| `--auto-merge`                            | `gh pr merge --auto --squash --delete-branch` for this run.                                                                                                               |
+| `--no-wait`                               | Do not wait for the merge; continue with features that do not depend on the open PR.                                                                                      |
+| `pnpm harness:report`                     | Table of past runs (feature, attempt, outcome, verdict, turns, cost, PR).                                                                                                 |
+| `pnpm harness:selftest`                   | Runs the installed harness against this project: prompts render, the guard still blocks its core cases and allows the project's commands, the hooks exit cleanly, doctor. |
+| `pnpm harness:update [--check]`           | Move this checkout to the newest harness release (`--to X.Y.Z` for another one; `--check` only reports).                                                                  |
+| `pnpm harness:feature list`               | Queue overview with `[ready]` / `[ready, human-only]` markers.                                                                                                            |
 
 **Staying on the newest harness.** With `update.auto`, before each feature the driver looks up the
 newest `vX.Y.Z` tag of the harness repository (`git ls-remote`). When it is newer than the
@@ -172,6 +173,9 @@ log (`src/events.ts` formats the stream):
 - the post-check problems, the evaluator's scores and findings, each CI check as it finishes, and the merge
 - on red CI: `=== F-NNN CI fix 1/2`, the fixer session like a generator session, then
   `fixer says <classification> …; N new commit(s) → evaluate | rerun | retry | give-up`
+
+Every `runs.jsonl` record names the harness version it ran on, and `harness report` shows it, so
+a failure can be traced to the release it ran on.
 
 `.harness/traces/F-NNN-<timestamp>.generator.jsonl` is the full stream (`--include-hook-events`, so
 hook blocks are visible); the `result` line at the end carries `num_turns`, `total_cost_usd`,
