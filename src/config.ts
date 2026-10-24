@@ -213,6 +213,15 @@ export const configSchema = z.object({
       wallClockMin: z.number().positive().default(15),
     })
     .prefault({}),
+  /** Moving to a newer harness release (`harness update`, docs/how-it-works.md → Operating). */
+  update: z
+    .object({
+      /** Before each feature, the loop moves to the newest release through its own update PR. */
+      auto: z.boolean().default(false),
+      /** Also take a breaking release (a new major version; a new minor version while 0.x). */
+      allowBreaking: z.boolean().default(false),
+    })
+    .prefault({}),
   /** The loop's look back at its own runs (`harness retro`, docs/self-improvement.md). */
   retro: z
     .object({

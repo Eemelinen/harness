@@ -9,6 +9,7 @@
  *   harness report              past driver runs
  *   harness retro …             the loop's look back at its own runs (src/retro.ts)
  *   harness doctor              is the project wired correctly (src/doctor.ts)
+ *   harness update …            move to a newer harness release (src/update.ts)
  *   harness config              print the resolved configuration
  */
 import { cleanStateCommand } from './clean-state'
@@ -18,9 +19,10 @@ import { featureCommand } from './feature'
 import { readFeatureList, summarizeFeatureList } from './feature-list'
 import { loopCommand } from './loop'
 import { retroCommand } from './retro'
+import { updateCommand } from './update'
 import { verifyCommand } from './verify'
 
-const usage = `usage: harness <check|feature|verify|clean-state|loop|report|retro|doctor|config> [args]
+const usage = `usage: harness <check|feature|verify|clean-state|loop|report|retro|doctor|update|config> [args]
 docs: https://github.com/Eemelinen/harness#readme`
 
 function check(argv: string[]): number {
@@ -57,6 +59,8 @@ export async function main(argv: string[]): Promise<number> {
       return retroCommand(rest)
     case 'doctor':
       return doctorCommand(rest)
+    case 'update':
+      return updateCommand(rest)
     case 'config':
       console.log(JSON.stringify(loadProject().config, null, 2))
       return 0

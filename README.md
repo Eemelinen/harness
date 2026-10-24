@@ -52,6 +52,7 @@ evidence lines name `pnpm harness:*`.
 | `harness report`                                                           | Past driver runs.                                                                                 |
 | `harness retro [--dry-run] [--signals] [--since <time>]`                   | Look back at the loop's runs and file harness problems as issues the loop builds.                 |
 | `harness doctor`                                                           | Is the project wired correctly (config, plugin pin = package version, required files, leftovers). |
+| `harness update [--to X.Y.Z] [--check]`                                    | Move to the newest harness release (pins, then doctor); `update.auto` does it from the loop.      |
 | `harness config`                                                           | Print the resolved configuration with defaults.                                                   |
 
 ## Requirements

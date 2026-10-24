@@ -13,16 +13,19 @@ this file to change on every branch; keep that heading text exactly.
 - The repository runs its own loop: features come from `harness-retro` issues filed by project
   retros (docs/self-improvement.md). Merges that change a shipped path are released by
   `.github/workflows/release.yml` (docs/developing.md → Releasing); it needs the `RELEASE_TOKEN` secret.
-- Last verified: F-003 on this commit, `pnpm check` green on 2026-10-24.
-- Highest-priority unfinished feature: none (F-001…F-003 passing).
+- Last verified: F-005 on this branch, `pnpm check` green on 2026-10-24.
+- Highest-priority unfinished feature: none (F-000…F-005 passing).
 - Current blocker: none.
 
 ## Next Steps
 
-1. Review and merge this branch (stacked on `feat/retro`, PR #3); it changes the guard, hooks and
-   prompts, so it waits for a human.
-2. Cut a release so the projects pick up F-001…F-003; until then their `generator-notes.md` carry
-   the no-self-evaluation rule.
+1. Create the `RELEASE_TOKEN` secret and its bypass of the main protection (docs/developing.md →
+   Releasing), then review and merge `feat/auto-release-update`. It changes the loop, the config and
+   a workflow, so it waits for a human. The merge should release v0.3.1 on its own; check the
+   Actions run.
+2. Move the projects to that release once (`pnpm harness:update`, then `pnpm check` and a commit).
+   After that, set `"update": { "auto": true }` in each project that runs `merge: "auto"` and watch the
+   first update-and-restart in its loop log.
 3. Build open `harness-retro` issues as they arrive (`pnpm harness:loop`, intake picks them up).
 
 ## Session Log
@@ -35,8 +38,20 @@ this file to change on every branch; keep that heading text exactly.
   or the minor number for a `!`/`BREAKING CHANGE` commit while 0.x; it releases nothing when no
   `package.json` `files` path changed. `release.yml` runs it after CI passes on a push to main and
   pushes with `RELEASE_TOKEN`, because main is protected. Verification: `pnpm harness:verify F-004`.
-- Known risk: the workflow is untested until the first merge with the secret set; the changelog
-  is now a list of commit subjects instead of curated prose.
+- F-005: `update.auto` (off by default). Before each feature the driver compares the newest `v*`
+  tag (`git ls-remote`) with the installed package. It opens a `harness/update-vX.Y.Z` PR from its
+  own worktree (pins only, new doctor plus `init.sh` with L1), auto-merges it under the auto policy,
+  pulls, reinstalls and re-execs itself with `HARNESS_LOOP_CARRY` (attempted features, retro and
+  failure counts). `harness update [--to] [--check]` does the same by hand. Breaking releases are
+  only reported unless `update.allowBreaking`. The plan had the update inside feature PRs as an
+  alternative; it was rejected because `.claude/settings.json` is in reviewPaths, so every feature
+  PR would wait for a human. Verification: `pnpm harness:verify F-005`; `harness update --check`
+  run against personal-finances (read-only) found v0.3.0 as newest.
+- `src/update.ts` and `scripts/release.ts` were added to this repository's reviewPaths: one decides
+  which update PRs skip a project's merge gate, the other runs with a token that can push to main.
+- Known risk: neither the release workflow nor a real update-and-restart has run yet. They need
+  the `RELEASE_TOKEN` secret, a merge, and a project loop with `update.auto` on. The changelog is
+  now a list of commit subjects instead of curated prose.
 
 ### Session 002 — 2026-10-24 (fixes from the first overnight loops)
 

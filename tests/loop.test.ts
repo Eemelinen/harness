@@ -4,7 +4,7 @@ import path from 'node:path'
 
 import { describe, expect, it } from 'vitest'
 
-import { mergeResult, pluginDir, queueEmptyNotice } from '../src/loop'
+import { mergeResult, planUpdate, pluginDir, queueEmptyNotice, readCarry } from '../src/loop'
 
 function dir(name: string, pkg: object) {
   const root = mkdtempSync(path.join(tmpdir(), `harness-${name}-`))
@@ -79,5 +79,67 @@ describe('queueEmptyNotice', () => {
 
   it('says only that the queue is empty when no branch is left', () => {
     expect(queueEmptyNotice([], list, 'feat/')).toBe('queue empty')
+  })
+})
+
+describe('planUpdate', () => {
+  const base = { installed: '0.3.0', allowBreaking: false, openBranch: false }
+
+  it('updates to a newer non-breaking release', () => {
+    expect(planUpdate({ ...base, latest: '0.3.4' })).toEqual({ action: 'update' })
+    expect(planUpdate({ ...base, installed: '1.2.0', latest: '1.4.1' })).toEqual({
+      action: 'update',
+    })
+  })
+
+  it('does nothing without a newer release', () => {
+    expect(planUpdate({ ...base, latest: undefined })).toEqual({ action: 'none' })
+    expect(planUpdate({ ...base, latest: '0.3.0' })).toEqual({ action: 'none' })
+    expect(planUpdate({ ...base, installed: '0.4.0', latest: '0.3.9' })).toEqual({
+      action: 'none',
+    })
+  })
+
+  it('waits while the update PR is open', () => {
+    expect(planUpdate({ ...base, latest: '0.3.1', openBranch: true })).toEqual({
+      action: 'none',
+      reason: 'the update PR for v0.3.1 is still open',
+    })
+  })
+
+  it('reports a breaking release instead of taking it, unless allowBreaking', () => {
+    const plan = planUpdate({ ...base, latest: '0.4.0' })
+    expect(plan.action).toBe('notify')
+    expect(plan).toMatchObject({ reason: expect.stringContaining('update.allowBreaking') })
+    expect(planUpdate({ ...base, installed: '1.9.0', latest: '2.0.0' }).action).toBe('notify')
+    expect(planUpdate({ ...base, latest: '0.4.0', allowBreaking: true })).toEqual({
+      action: 'update',
+    })
+  })
+})
+
+describe('readCarry', () => {
+  it('restores what a restarted loop run keeps', () => {
+    const carry = {
+      attempted: ['F-001'],
+      intakeIssues: [5],
+      retros: 1,
+      consecutiveFailures: 1,
+      updates: ['0.3.1'],
+    }
+    expect(readCarry(JSON.stringify(carry))).toEqual(carry)
+  })
+
+  it('starts empty without or with a broken carry', () => {
+    const empty = {
+      attempted: [],
+      intakeIssues: [],
+      retros: 0,
+      consecutiveFailures: 0,
+      updates: [],
+    }
+    expect(readCarry(undefined)).toEqual(empty)
+    expect(readCarry('{')).toEqual(empty)
+    expect(readCarry('{"retros":2}')).toEqual({ ...empty, retros: 2 })
   })
 })

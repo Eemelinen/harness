@@ -90,9 +90,13 @@ fix on an auto-merge PR passes the same gate before it is pushed; if it now need
 driver disables auto-merge and hands the PR over. A held PR's body says why, the driver notifies
 you, and the loop continues with features that do not depend on it.
 
-A merged harness fix is released automatically, but it reaches a project only when the project's
-pins move ([developing.md](developing.md) → Releasing), so a fix the loop got wrong cannot spread
-to a running loop unnoticed.
+A merged harness fix is released automatically. It reaches a project when the project's pins move
+([developing.md](developing.md) → Releasing): by hand, or before the next feature when the project
+sets `update.auto`. With `update.auto`, a fix the loop got wrong does reach the other projects'
+running loops. Its limits are the harness repository's own merge gate (`reviewPaths` with
+`review.mode: "human"`, so guard, hook, prompt and loop changes wait for a human), the
+update PR's doctor and L1 baseline, and the CI of each project. Leave `update.auto` off where
+that is too much trust.
 
 ## Turning it on
 

@@ -135,7 +135,29 @@ rely on `allowedTools` alone.
 | `--auto-merge`                            | `gh pr merge --auto --squash --delete-branch` for this run.                                               |
 | `--no-wait`                               | Do not wait for the merge; continue with features that do not depend on the open PR.                      |
 | `pnpm harness:report`                     | Table of past runs (feature, attempt, outcome, verdict, turns, cost, PR).                                 |
+| `pnpm harness:update [--check]`           | Move this checkout to the newest harness release (`--to X.Y.Z` for another one; `--check` only reports).  |
 | `pnpm harness:feature list`               | Queue overview with `[ready]` / `[ready, human-only]` markers.                                            |
+
+**Staying on the newest harness.** With `update.auto`, before each feature the driver looks up the
+newest `vX.Y.Z` tag of the harness repository (`git ls-remote`). When it is newer than the
+installed package, the driver:
+
+1. Creates a `harness/update-vX.Y.Z` worktree, pins the package and the plugin marketplace ref to
+   the release (the same steps as `pnpm harness:update`) and runs the new version's
+   `harness doctor` and `init.sh` with the L1 baseline.
+2. Commits `chore(harness): update to vX.Y.Z`, pushes and opens the PR. A PR that changes only the
+   pin files skips the merge gate. Under the auto merge policy it auto-merges, and the driver waits
+   for it, even with `--no-wait`.
+3. Once it merges, the driver pulls, runs `pnpm install` and restarts itself on the new version. The
+   features it already tried, the retro count and the failure count carry over, and the next
+   feature runs entirely on the new release.
+
+It stays on the installed version and moves on to the feature when anything fails. That covers a red
+baseline, a red CI on the update PR (auto-merge is disabled) and a PR that waits for a human merge
+(`merge: "wait"`, or a diff with more than the pins). The driver does not retry a release in the same
+run, and it skips while the update PR is open. It only reports a breaking release (a new major
+version; a new minor while 0.x) unless `update.allowBreaking` is set. It never updates the harness
+repository itself. `harness report` lists updates as `updated`.
 
 **Reading a run.** The console and `.harness/traces/F-NNN-<timestamp>.log` show the same readable
 log (`src/events.ts` formats the stream):

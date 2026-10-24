@@ -59,11 +59,13 @@ To release by hand (a release that failed, or a change the filter skipped), re-r
 from the Actions tab, or run the same steps locally: `pnpm exec tsx scripts/release.ts`, then
 `git push --atomic origin HEAD:main vX.Y.Z`.
 
-**Update each project** to a new release:
+**Update each project** to a new release. A project with `update.auto` does it from its loop
+before the next feature ([how-it-works.md](how-it-works.md#4-operating-the-loop)). By hand:
 
-- `pnpm add -D "@eemelinen/harness@github:Eemelinen/harness#vX.Y.Z"`
-- set the marketplace `ref` in `.claude/settings.json` to `vX.Y.Z`
-- `pnpm harness:doctor`, then `pnpm check`
+- `pnpm harness:update` (or `--to X.Y.Z`): pins the package with
+  `pnpm add -D "@eemelinen/harness@github:Eemelinen/harness#vX.Y.Z"`, sets the marketplace `ref`
+  in `.claude/settings.json` to `vX.Y.Z` and runs the new version's `harness doctor`
+- `pnpm check`
 - commit as `chore(harness): update to vX.Y.Z`
 - interactive sessions pick the new plugin up after `claude plugin marketplace update eemelinen-harness`
   (or a restart with auto-update on)
