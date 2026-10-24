@@ -53,6 +53,10 @@ sequenceDiagram
     alt post-check fails
         D->>S: feature attempt (auto-blocks at max_attempts) → retry with the failure appended
     end
+    opt verify.regression set
+        D->>S: run each command in the worktree (e.g. pnpm test:integration)
+        Note over D,S: a failure is a failed attempt → retry with the command and its output tail
+    end
     D->>E: evaluate F-042 (rubric, JSON schema), fresh context, read-only
     E-->>D: verdict Accept | Revise | Block + scores + findings
     alt Revise
@@ -108,6 +112,7 @@ delete).
 | Plugin check                                        | An unattended session that started without the guard (plugin not loaded)                                                                                                                                                                                                                                                              | `harness loop`                                         |
 | No GitHub token in sessions                         | A session that read injected text (an issue, a PR, a trace) acting as the owner on GitHub: driver-started sessions get no `GH_TOKEN`/`GITHUB_TOKEN` and an empty `gh` config, so `gh` is logged out; the driver keeps its own access                                                                                                  | `harness loop`, `harness retro` (`sessionEnv`)         |
 | Driver post-check                                   | A transcript that claims success while the branch says otherwise (status, clean-state, no commits)                                                                                                                                                                                                                                    | `harness loop`                                         |
+| Driver regression gate (`verify.regression`)        | A change that breaks another feature's test while the feature's own steps pass (found by CI after the PR otherwise)                                                                                                                                                                                                                   | `harness loop`                                         |
 | Evaluator (fresh context, read-only)                | Work that passes its own tests but misses the behaviour, scope creep, stale evidence, bad handoff                                                                                                                                                                                                                                     | plugin `agents/evaluator.md`, project rubric           |
 | Caps                                                | Runaway sessions: turns, budget, wall clock, attempts, consecutive failures                                                                                                                                                                                                                                                           | `harness.config.json`                                  |
 | CI on the PR                                        | Everything again on a clean runner                                                                                                                                                                                                                                                                                                    | project `.github/workflows/`                           |

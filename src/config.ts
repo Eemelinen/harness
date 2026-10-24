@@ -115,6 +115,12 @@ export const configSchema = z.object({
       ciNotes: z.partialRecord(layer, z.string().min(1)).default({}),
       /** Shell used for verification commands (they are written for POSIX sh). */
       shell: z.string().min(1).default('sh'),
+      /**
+       * Commands the loop driver runs in the worktree after the post-check and before the
+       * evaluator, whatever the feature's own verification lists (e.g. `pnpm test:integration`).
+       * The first one that fails fails the attempt; its output goes to the next attempt.
+       */
+      regression: z.array(z.string().min(1)).default([]),
     })
     .prefault({}),
   /** Bash commands the loop log reports as test milestones (the pattern matches at command start). */

@@ -159,6 +159,14 @@
           "default": "sh",
           "type": "string",
           "minLength": 1
+        },
+        "regression": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
         }
       }
     },

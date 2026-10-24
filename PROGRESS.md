@@ -13,8 +13,8 @@ this file to change on every branch; keep that heading text exactly.
 - The repository runs its own loop: features come from `harness-retro` issues filed by project
   retros (docs/self-improvement.md). Merges that change a shipped path are released by
   `.github/workflows/release.yml` (docs/developing.md → Releasing); it needs the `RELEASE_TOKEN` secret.
-- Last verified: F-014 on this branch, `pnpm check` green on 2026-10-24.
-- Highest-priority unfinished feature: none (F-000…F-014 passing).
+- Last verified: F-015 on this branch, `pnpm check` green on 2026-10-24.
+- Highest-priority unfinished feature: none (F-000…F-015 passing).
 - Current blocker: none.
 
 ## Next Steps
@@ -30,8 +30,24 @@ this file to change on every branch; keep that heading text exactly.
    taken by the other. A canary loop stopped mid-test lets its claim lapse after 4 h. A quarantine
    issue opened by hand makes the projects roll back.
 3. Build open `harness-retro` issues as they arrive (`pnpm harness:loop`, intake picks them up).
+4. After the release with F-015, set `"verify": { "regression": ["pnpm test:integration"] }` in
+   metsavahti (and in any project whose CI runs suites that `pnpm check` leaves out).
 
 ## Session Log
+
+### Session 004 — 2026-10-24 (regression gate before the evaluator)
+
+- Goal: F-015, requested by hand. metsavahti F-024 listed only L1 steps; the generator and the
+  evaluator accepted it and CI failed on PR #36 in the integration suite, because a migration test
+  fixture still used a cutting-type code that F-024 renumbered. Nothing between the post-check and
+  the PR ran the suites a feature does not list, and the CI fixer only starts after a PR exists.
+- Done: `verify.regression` (default `[]`, so pinned projects see no change). The driver runs the
+  commands after the post-check and before the evaluator; a failure is a failed attempt whose
+  context has the command and the end of its output. The generator prompt names the commands. It
+  is skipped with `--no-docker`. Tests in `tests/loop.test.ts`; docs in `docs/config.md` and
+  `docs/how-it-works.md`.
+- Choice: the timeout is `caps.wallClockMin` rather than a new key; a suite that needs longer than a
+  generator session is a project problem to fix in the suite.
 
 ### Session 003 — 2026-10-24 (automatic releases, project updates, rollout safety)
 

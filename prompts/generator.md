@@ -34,4 +34,4 @@ Rules for unattended runs:
   outcome; an unverified "passing" is not.
 - Stop when the feature is `passing` or `blocked` and the tree is committed. The Stop hook will refuse to end
   the session in any other state.
-  {{PROJECT_NOTES}}{{CONTEXT}}
+  {{REGRESSION}}{{PROJECT_NOTES}}{{CONTEXT}}

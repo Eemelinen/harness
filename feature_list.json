@@ -210,6 +210,19 @@
       "evidence": ["2026-10-24 pnpm check → pass (working tree on 579b4a8)"],
       "attempts": 0,
       "notes": "Proposed by harness-updater triage of harness #11 (2026-10-24): that quarantine said only that the driver exited with code 1, because the restarted driver wrote to the terminal only; the cause (F-013) was found in a terminal transcript."
+    },
+    {
+      "id": "F-015",
+      "priority": 15,
+      "area": "loop",
+      "title": "Run the project regression suites before the evaluator",
+      "user_visible_behavior": "A project can list commands in verify.regression (e.g. pnpm test:integration). After a generator session passes the post-check, the driver runs them in the worktree, in order, without a GitHub token, under the generator wall-clock cap, and writes their output to <traceDir>/<id>-<time>.regression.log. The first failing or timed-out command fails the attempt: it is recorded as a failed attempt and the next attempt gets the command and the end of its output. The generator prompt names the commands so the session can run them before clocking out. With --no-docker the gate is skipped and the log says so. Without the key nothing changes.",
+      "status": "passing",
+      "depends_on": [],
+      "verification": ["L1: pnpm check"],
+      "evidence": ["2026-10-24 pnpm check → pass (working tree on 554237b)"],
+      "attempts": 0,
+      "notes": "Requested by hand on 2026-10-24 after metsavahti F-024 (PR #36): the feature listed only L1 steps, the generator and the evaluator accepted it, and CI then failed in the integration suite (a migration test fixture still used the old cutting-type code). Nothing between the post-check and the PR ran the suites the feature did not list."
     }
   ]
 }

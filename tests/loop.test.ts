@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -12,6 +12,8 @@ import {
   queueEmptyNotice,
   probationResult,
   readCarry,
+  regressionGate,
+  regressionNote,
   retryFeature,
   supervise,
   withHarnessVersion,
@@ -47,6 +49,71 @@ describe('pluginDir', () => {
 
   it('falls back to the driver when nothing is installed', () => {
     expect(pluginDir(dir('bare', { name: 'bare' }), driver)).toBe(path.join(driver, 'plugin'))
+  })
+})
+
+describe('regressionGate', () => {
+  const gate = (commands: string[], timeoutMs = 10_000) => {
+    const cwd = mkdtempSync(path.join(tmpdir(), 'harness-regression-'))
+    const logFile = path.join(cwd, 'traces', 'F-001.regression.log')
+    return regressionGate(commands, { cwd, shell: 'sh', logFile, timeoutMs }).then((failure) => ({
+      failure,
+      log: readFileSync(logFile, 'utf8'),
+      cwd,
+    }))
+  }
+
+  it('passes when every command exits 0 and logs each one', async () => {
+    const { failure, log } = await gate(['echo unit', 'echo integration'])
+    expect(failure).toBeUndefined()
+    expect(log).toContain('$ echo unit\nunit\nexit 0')
+    expect(log).toContain('$ echo integration\nintegration\nexit 0')
+  })
+
+  it('stops at the first failing command and returns the end of its output', async () => {
+    // metsavahti F-024: accepted with L1 only, then CI's integration suite failed on the PR.
+    const { failure, log } = await gate([
+      'echo ok',
+      "printf '\\033[31m× migration round-trip\\033[39m\\n' >&2; echo 'Tests  1 failed'; exit 1",
+      'touch never-run',
+    ])
+    expect(failure).toMatchObject({ code: 1, timedOut: false })
+    expect(failure?.command).toContain('migration round-trip')
+    expect(failure?.tail).toBe('× migration round-trip\nTests  1 failed')
+    expect(log).toContain('exit 1')
+    expect(log).not.toContain('never-run')
+  })
+
+  it('runs in the worktree without a GitHub token', async () => {
+    process.env.GH_TOKEN = 'secret'
+    try {
+      const { failure, cwd } = await gate([
+        'test -z "$GH_TOKEN" && test "$HARNESS_LOOP" = 1 && pwd > where',
+      ])
+      expect(failure).toBeUndefined()
+      expect(readFileSync(path.join(cwd, 'where'), 'utf8').trim()).toBe(cwd)
+    } finally {
+      delete process.env.GH_TOKEN
+    }
+  })
+
+  it('fails a command that runs past the timeout', async () => {
+    const { failure, log } = await gate(['echo started; sleep 5'], 200)
+    expect(failure).toMatchObject({ timedOut: true, tail: 'started' })
+    expect(log).toContain('(timed out)')
+  })
+})
+
+describe('regressionNote', () => {
+  it('is empty without regression commands', () => {
+    expect(regressionNote([])).toBe('')
+  })
+
+  it('tells the generator what the driver runs after its session', () => {
+    expect(regressionNote(['pnpm test:integration'])).toContain(
+      'the driver runs `pnpm test:integration` in this worktree before the evaluator',
+    )
+    expect(regressionNote(['a', 'b'])).toContain('run them yourself before you clock out')
   })
 })
 

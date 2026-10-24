@@ -56,11 +56,20 @@ passing`; verification steps prefixed `L1: `, `L2: `, `L3: ` or `manual: `.
 
 ## `verify`
 
-| Key            | Default        | Meaning                                                                                                           |
-| -------------- | -------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `dockerLayers` | `["L2", "L3"]` | Layers that need `services` up first; `harness verify` refuses to run them otherwise, and their evidence says so. |
-| `ciNotes`      | `{}`           | Extra evidence text per layer when `CI` is set, e.g. `{ "L3": "CI=1: next start on the last build, retries 2" }`. |
-| `shell`        | `"sh"`         | Verification commands run as `<shell> -c "<command>"` from the project root.                                      |
+| Key            | Default        | Meaning                                                                                                                                                                            |
+| -------------- | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `dockerLayers` | `["L2", "L3"]` | Layers that need `services` up first; `harness verify` refuses to run them otherwise, and their evidence says so.                                                                  |
+| `ciNotes`      | `{}`           | Extra evidence text per layer when `CI` is set, e.g. `{ "L3": "CI=1: next start on the last build, retries 2" }`.                                                                  |
+| `shell`        | `"sh"`         | Verification commands run as `<shell> -c "<command>"` from the project root.                                                                                                       |
+| `regression`   | `[]`           | Commands the loop driver runs in the worktree after the post-check, before the evaluator, whatever the feature's verification lists (e.g. `["pnpm test:integration"]`). See below. |
+
+`verify.regression` catches a change that breaks another feature's test. A feature's verification
+steps cover its own tests, so without it such a break is found only by CI after the PR. The driver
+runs the commands in order through `verify.shell`, with the session environment (no GitHub token),
+each under `caps.wallClockMin`, and writes their output to `<traceDir>/<id>-<time>.regression.log`.
+The first one that fails or times out fails the attempt like a Revise: the next attempt gets the
+command and the end of its output. The generator prompt names the commands so the session runs them
+before it clocks out. `harness loop --no-docker` skips the gate (the services are not up).
 
 ## `services`
 
