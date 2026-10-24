@@ -99,6 +99,9 @@ this file to change on every branch; keep that heading text exactly.
   `restart-mismatch`, which the supervisor treats as settled. The bug is in the parent, so every
   project on v0.3.1–v0.3.4 needs one hand update to the release with this fix. Verification:
   `pnpm harness:verify F-013`; a test reproduces the cached `require.resolve`.
+- The intake is gated on `updater:accepted` (`retro.intakeLabel` in this repo's config):
+  harness-updater (Docker, triage mode) validates each retro and quarantine issue first, and this
+  loop builds only the ones it accepted. A config-only change: nothing is released.
 - Bootstrapping: rollback and re-test run in the version a project rolls back to, so they are
   complete only from the release after the one that ships F-008. Until then the staged rollout and
   the selftest (F-007) are the guard.
