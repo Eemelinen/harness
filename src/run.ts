@@ -1,5 +1,7 @@
 /** Process helpers shared by the commands. */
 import { spawnSync, type SpawnSyncReturns } from 'node:child_process'
+import { mkdirSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -51,6 +53,35 @@ export function sh(
     maxBuffer: 64 * 1024 * 1024,
   })
   return { code: res.status ?? 1, out: (res.stdout ?? '').trim(), err: (res.stderr ?? '').trim() }
+}
+
+/** Variables through which `gh` and git reach a GitHub token. */
+const TOKEN_VARIABLES = [
+  'GH_TOKEN',
+  'GITHUB_TOKEN',
+  'GH_ENTERPRISE_TOKEN',
+  'GITHUB_ENTERPRISE_TOKEN',
+]
+
+/**
+ * The environment of a driver-started Claude session. Sessions never need GitHub, because the
+ * driver pushes, opens PRs and reads CI. So the session gets no GitHub token: the token variables
+ * are removed, and `gh` gets an empty config directory, so its stored login (`gh auth login`)
+ * is not found either. A session that reads injected text (an issue, a PR, a trace) therefore
+ * cannot act as the owner on GitHub. `git push` is also blocked by the guard.
+ */
+export function sessionEnv(
+  base: NodeJS.ProcessEnv,
+  extra: Record<string, string | undefined> = {},
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...base, ...extra }
+  for (const name of TOKEN_VARIABLES) delete env[name]
+  const ghConfig = path.join(tmpdir(), 'harness-session-gh')
+  mkdirSync(ghConfig, { recursive: true })
+  env.GH_CONFIG_DIR = ghConfig
+  env.GH_PROMPT_DISABLED = '1'
+  env.GIT_TERMINAL_PROMPT = '0'
+  return env
 }
 
 /** Run a configured command line (`docker info`, `pnpm db:up`) through the platform shell. */

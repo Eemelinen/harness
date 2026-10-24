@@ -13,8 +13,8 @@ this file to change on every branch; keep that heading text exactly.
 - The repository runs its own loop: features come from `harness-retro` issues filed by project
   retros (docs/self-improvement.md). Merges that change a shipped path are released by
   `.github/workflows/release.yml` (docs/developing.md → Releasing); it needs the `RELEASE_TOKEN` secret.
-- Last verified: F-011 on this branch, `pnpm check` green on 2026-10-24.
-- Highest-priority unfinished feature: none (F-000…F-011 passing).
+- Last verified: F-012 on this branch, `pnpm check` green on 2026-10-24.
+- Highest-priority unfinished feature: none (F-000…F-012 passing).
 - Current blocker: none.
 
 ## Next Steps
@@ -84,6 +84,12 @@ this file to change on every branch; keep that heading text exactly.
   issue, quarantine and rollout readers for harness-updater, the Docker service that triages
   harness issues. The harness config is switched to `intakeLabel: "updater:accepted"` only once
   the updater runs in triage mode. Verification: `pnpm harness:verify F-011`.
+- F-012: driver-started sessions run with `sessionEnv`: no GitHub token variables and an empty
+  `GH_CONFIG_DIR`, so `gh` is logged out in a session even on a machine where `gh auth login` is
+  stored. The driver keeps its own access. Prompted by harness-updater, which runs the loop with
+  the owner's token. Also: the settings template no longer carries `Write(...)` deny rules, which
+  Claude Code ignores (`Edit(...)` covers every file-editing tool). Verification:
+  `pnpm harness:verify F-012`.
 - Bootstrapping: rollback and re-test run in the version a project rolls back to, so they are
   complete only from the release after the one that ships F-008. Until then the staged rollout and
   the selftest (F-007) are the guard.

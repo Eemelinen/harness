@@ -28,7 +28,7 @@ import { z } from 'zod'
 
 import { loadProject, type HarnessConfig, type Project } from './config'
 import { FEATURE_ID, type Feature } from './feature-list'
-import { PACKAGE_ROOT, sh } from './run'
+import { PACKAGE_ROOT, sessionEnv, sh } from './run'
 
 // ---------------------------------------------------------------------------------------
 // Signals
@@ -840,7 +840,7 @@ export function runRetro(project: Project, options: RetroOptions = {}): RetroRes
   const res = spawnSync('claude', args, {
     cwd: root,
     encoding: 'utf8',
-    env: { ...process.env, HARNESS_LOOP: '1' },
+    env: sessionEnv(process.env, { HARNESS_LOOP: '1' }),
     timeout: config.retro.wallClockMin * 60_000,
     maxBuffer: 64 * 1024 * 1024,
   })
