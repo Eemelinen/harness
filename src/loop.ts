@@ -32,7 +32,9 @@ import {
   createWriteStream,
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
+  statSync,
   writeFileSync,
 } from 'node:fs'
 import { createRequire } from 'node:module'
@@ -76,7 +78,7 @@ import {
 } from './retro'
 import { hardStops, parseSafetyVerdict, type SafetyVerdict, type Snapshot } from './review'
 import { PACKAGE_ROOT, sh as run, shellLine } from './run'
-import { quarantine } from './quarantine'
+import { excerptLog, quarantine } from './quarantine'
 import {
   claim,
   ensureRolloutIssue,
@@ -1642,6 +1644,9 @@ export interface Retry {
   suspect: string
   from: string
   evidence: string[]
+  /** The failed run's trace paths and log excerpt (src/quarantine.ts). */
+  traces?: string[]
+  excerpt?: string[]
   canary?: CanaryClaim
   /** The retro issue the feature came from; its feature exists only on the set-aside branch. */
   intake?: IntakeItem
@@ -2156,8 +2161,39 @@ function runEvidence(id: string, version: string, since?: string): string[] {
     .filter((r) => r.feature === id && r.harness === version && (!since || r.ts >= since))
     .map(
       (r) =>
-        `${id} attempt ${r.attempt} on v${version}: ${r.outcome}${r.verdict ? ` (${r.verdict})` : ''}${r.note ? ` — ${r.note.slice(0, 200)}` : ''}${r.trace ? ` · trace \`${path.relative(ROOT, r.trace)}\`` : ''}`,
+        `${id} attempt ${r.attempt} on v${version}: ${r.outcome}${r.verdict ? ` (${r.verdict})` : ''}${r.note ? ` — ${r.note.slice(0, 200)}` : ''}`,
     )
+}
+
+/**
+ * What a fixing session needs from a failed run besides the evidence lines: an excerpt of its
+ * readable log and the absolute paths of that log and of the run's traces.
+ */
+function runDetails(
+  id: string,
+  version: string,
+  since: string,
+  log: string | undefined,
+): { traces: string[]; excerpt: string[] } {
+  const traces = readRunRecords()
+    .filter((r) => r.feature === id && r.harness === version && r.ts >= since && r.trace)
+    .map((r) => path.resolve(ROOT, r.trace))
+  const readable = log && existsSync(log) ? log : undefined
+  return {
+    traces: [...new Set([...(readable ? [readable] : []), ...traces])],
+    excerpt: readable ? excerptLog(readFileSync(readable, 'utf8')) : [],
+  }
+}
+
+/** The newest readable log written since `since` (a restarted driver's, after it exited). */
+function newestLogSince(since: string): string | undefined {
+  const dir = path.join(ROOT, config.traceDir)
+  if (!existsSync(dir)) return undefined
+  return readdirSync(dir)
+    .filter((f) => f.endsWith('.log'))
+    .map((f) => path.join(dir, f))
+    .filter((f) => statSync(f).mtime.toISOString() >= since)
+    .sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs)[0]
 }
 
 /** Quarantines `version` and returns the issue URL; a failure to file is notified, never thrown. */
@@ -2235,10 +2271,13 @@ async function rollbackCrashed(
     )
     return false
   }
+  const log = newestLogSince(child.since)
   const url = quarantineRelease({
     version,
     from,
     cause: `the loop driver exits with code ${child.code}`,
+    traces: log ? [log] : undefined,
+    excerpt: log ? excerptLog(readFileSync(log, 'utf8')) : undefined,
     evidence: [
       `the loop driver on v${version} exited with code ${child.code} before its first feature settled; the preflight of v${from} passes in the same checkout`,
       ...readRunRecords()
@@ -2511,6 +2550,7 @@ export async function loopCommand(argv: string[]): Promise<number> {
           ...runEvidence(feature.id, probation.version, started),
           ...(failure ? [`${feature.id} on v${probation.version}: driver error — ${failure}`] : []),
         ]
+        const details = runDetails(feature.id, probation.version, started, logFile)
         evidence.push(`the run is kept as branch \`${setAside(feature.id, probation.version)}\``)
         notify(
           `${feature.id} ${outcome} on harness v${probation.version}, its first feature after the update; rolling back to v${probation.from} to re-test it there`,
@@ -2534,6 +2574,7 @@ export async function loopCommand(argv: string[]): Promise<number> {
           suspect: probation.version,
           from: probation.from,
           evidence,
+          ...details,
           intake,
           canary: probation.canary,
         }
@@ -2553,6 +2594,8 @@ export async function loopCommand(argv: string[]): Promise<number> {
           from: retry.from,
           cause: `${feature.id} did not pass on v${retry.suspect} and passed on v${retry.from}`,
           evidence: [...evidence, `${feature.id} on v${retry.from}: done`],
+          traces: retry.traces,
+          excerpt: retry.excerpt,
         })
         closeCanary(retry.canary, url, 'quarantine filing failed')
       } else {

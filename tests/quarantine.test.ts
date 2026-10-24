@@ -20,9 +20,9 @@ vi.mock('../src/run', async (original) => ({
   },
 }))
 
-const { quarantine, quarantineBody, quarantineFingerprint, quarantineTitle } =
+const { excerptLog, quarantine, quarantineBody, quarantineFingerprint, quarantineTitle } =
   await import('../src/quarantine')
-const { fingerprintOf, parseIssueFeature } = await import('../src/retro')
+const { fingerprintOf, issueContext, parseIssueFeature } = await import('../src/retro')
 const { quarantinedVersions } = await import('../src/update')
 
 const report = {
@@ -67,6 +67,72 @@ describe('quarantine issue', () => {
     const title = quarantineTitle({ ...report, cause: 'x'.repeat(200) }, 'P')
     expect(title.length).toBeLessThan(130)
     expect(title).toMatch(/…$|… \(P\)$/)
+  })
+})
+
+describe('excerptLog', () => {
+  const log = [
+    '[harness 01:00:00] F-012 — Add export; readable log: .harness/traces/F-012.log',
+    ...Array.from(
+      { length: 200 },
+      (_, i) => `[harness 01:${String(i % 60).padStart(2, '0')}:00] bash: step ${i}`,
+    ),
+    '[harness 02:10:00] ⛔ guard: run tests through pnpm test:*',
+    ...Array.from({ length: 20 }, (_, i) => `[harness 02:11:00] edit: src/file${i}.ts`),
+    '[harness 02:20:00] post-check failed (1 problem(s)):',
+    '[harness 02:20:00]   ✗ F-012 is still in_progress',
+    '[harness 02:21:00] generator finished: turns 87 · cost $3.10 · denials 4',
+  ].join('\n')
+
+  it('keeps the telling lines and the end of the run, in order', () => {
+    const lines = excerptLog(log)
+    expect(lines).toContain('[harness 02:10:00] ⛔ guard: run tests through pnpm test:*')
+    expect(lines.at(-1)).toBe(
+      '[harness 02:21:00] generator finished: turns 87 · cost $3.10 · denials 4',
+    )
+    expect(lines.indexOf('[harness 02:20:00]   ✗ F-012 is still in_progress')).toBeGreaterThan(
+      lines.indexOf('[harness 02:10:00] ⛔ guard: run tests through pnpm test:*'),
+    )
+    expect(lines.some((l) => l.includes('bash: step 10'))).toBe(false)
+  })
+
+  it('stays within its size and cannot break the code fence', () => {
+    const noisy = Array.from(
+      { length: 100 },
+      (_, i) => `✗ failure ${i} ${'x'.repeat(400)} \`\`\``,
+    ).join('\n')
+    const lines = excerptLog(noisy)
+    expect(lines.join('\n').length).toBeLessThanOrEqual(1400)
+    expect(lines.every((l) => l.length <= 240 && !l.includes('```'))).toBe(true)
+    expect(lines.at(-1)).toContain('failure 99')
+  })
+})
+
+describe('quarantine details', () => {
+  it('puts the excerpt and the trace paths where the intake notes keep them', () => {
+    const body = quarantineBody(
+      {
+        ...report,
+        evidence: Array.from(
+          { length: 4 },
+          (_, i) => `F-012 attempt ${i} on v0.3.5: failed — ${'n'.repeat(150)}`,
+        ),
+        excerpt: excerptLog(
+          Array.from({ length: 80 }, (_, i) => `✗ line ${i} ${'y'.repeat(60)}`).join('\n'),
+        ),
+        traces: [
+          '/home/u/p/.harness/traces/F-012-1.log',
+          '/home/u/p/.harness/traces/F-012-1.generator.jsonl',
+        ],
+      },
+      'Metsävahti',
+      '2026-10-25',
+    )
+    const notes = issueContext(body)
+    expect(notes).toContain('**Log excerpt**')
+    expect(notes).toContain('✗ line 79')
+    expect(notes).toContain('`/home/u/p/.harness/traces/F-012-1.generator.jsonl`')
+    expect(parseIssueFeature(body)?.title).toBe('Fix the regression in v0.3.5 seen in Metsävahti')
   })
 })
 

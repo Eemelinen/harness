@@ -208,9 +208,10 @@ completed. Every project's loop skips that release, and a project already on it 
 eligible release (the fix), or else back to the newest older release that isn't quarantined, through
 a `harness/rollback-vX.Y.Z` PR. The age limit doesn't apply to moving off a quarantined release.
 
-- **Filed by the driver:** the issue has the evidence and a feature block, so the harness
-  repository's loop builds the fix (`retro.intake`). A second project that finds the same release
-  bad comments on the same issue.
+- **Filed by the driver:** the issue has the evidence, an excerpt of the failing run's readable log,
+  the absolute paths of that log and its traces, and a feature block, so the harness repository's
+  loop builds the fix (`retro.intake`). The loops all run on one machine, so the fixing session can
+  open the traces. A second project that finds the same release bad comments on the same issue.
 - **By hand:**
   `gh issue create --repo Eemelinen/harness --label harness-quarantine --title "quarantine vX.Y.Z: <why>"`.
 - **Lift it:** close the issue as **not planned**. The fix PR closes it as completed, which keeps the

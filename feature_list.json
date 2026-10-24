@@ -145,6 +145,19 @@
       "evidence": ["2026-10-24 pnpm check → pass (working tree on 38c2998)"],
       "attempts": 0,
       "notes": "Requested 2026-10-24: replace the fixed waiting time (update.minAgeHours, unreleased) with a first-come canary, so no project takes a release nobody tested. The 4 h the user called the quarantine time is the claim window."
+    },
+    {
+      "id": "F-010",
+      "priority": 10,
+      "area": "loop",
+      "title": "Quarantine issues carry a log excerpt and absolute trace paths",
+      "user_visible_behavior": "A quarantine issue filed after a failed probation, a re-test or a driver crash includes an excerpt of the failing run readable log (telling lines and the end of the run, within the 3000 characters the intake keeps) and the absolute paths of that log and its traces, so the harness loop session that builds the fix can read the failure.",
+      "status": "passing",
+      "depends_on": ["F-009"],
+      "verification": ["L1: pnpm check"],
+      "evidence": ["2026-10-24 pnpm check → pass (working tree on 35317d5)"],
+      "attempts": 0,
+      "notes": "Requested 2026-10-24: the evidence named traces relative to the project, so a fixing session in the harness repository could not open them."
     }
   ]
 }

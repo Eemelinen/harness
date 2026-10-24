@@ -13,8 +13,8 @@ this file to change on every branch; keep that heading text exactly.
 - The repository runs its own loop: features come from `harness-retro` issues filed by project
   retros (docs/self-improvement.md). Merges that change a shipped path are released by
   `.github/workflows/release.yml` (docs/developing.md → Releasing); it needs the `RELEASE_TOKEN` secret.
-- Last verified: F-009 on this branch, `pnpm check` green on 2026-10-24.
-- Highest-priority unfinished feature: none (F-000…F-009 passing).
+- Last verified: F-010 on this branch, `pnpm check` green on 2026-10-24.
+- Highest-priority unfinished feature: none (F-000…F-010 passing).
 - Current blocker: none.
 
 ## Next Steps
@@ -77,6 +77,9 @@ this file to change on every branch; keep that heading text exactly.
   lapses after `update.canaryHours` (4; the "quarantine time" in the request). A failed update or an
   inconclusive re-test releases it; a quarantine closes the issue. `RELEASE_TOKEN` now also needs
   Issues: read and write. Verification: `pnpm harness:verify F-009`.
+- F-010: quarantine issues carry an excerpt of the failing run's readable log (telling lines plus
+  the end, at most 1400 characters, so it survives the intake's 3000-character notes) and the
+  absolute paths of that log and its traces. Verification: `pnpm harness:verify F-010`.
 - Bootstrapping: rollback and re-test run in the version a project rolls back to, so they are
   complete only from the release after the one that ships F-008. Until then the staged rollout and
   the selftest (F-007) are the guard.
