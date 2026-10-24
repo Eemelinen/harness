@@ -96,6 +96,7 @@ import {
   applyUpdate,
   compareVersions,
   installedBin,
+  installedVersion,
   isHarnessRepo,
   listQuarantined,
   listReleases,
@@ -615,6 +616,7 @@ interface RunRecord {
     | 'quarantined'
     | 'probation-ok'
     | 'probation-cleared'
+    | 'restart-mismatch'
   verdict?: string
   pr?: string
   costUsd: number
@@ -1668,6 +1670,7 @@ export function probationResult(
 
 /** Outcomes that settle a probation; a restarted driver that wrote none of them did not finish one. */
 const PROBATION_SETTLED = new Set([
+  'restart-mismatch',
   'probation-ok',
   'rolled-back',
   'quarantined',
@@ -1946,13 +1949,13 @@ let ghWarned = false
  * release when the installed one is quarantined. Returns true when the default branch now has the
  * new pins and the driver must restart. Each release is handled once per loop run.
  */
-async function maybeUpdate(opts: Options, carry: Carry): Promise<boolean> {
-  if (!config.update.auto || isHarnessRepo(ROOT)) return false
+async function maybeUpdate(opts: Options, carry: Carry): Promise<string | undefined> {
+  if (!config.update.auto || isHarnessRepo(ROOT)) return undefined
   if (!ghAvailable()) {
     if (!ghWarned)
       log('harness update skipped: gh is not logged in (releases and quarantines are read with gh)')
     ghWarned = true
-    return false
+    return undefined
   }
   const installed = packageVersion()
   const repo = rolloutRepo(config)
@@ -1972,18 +1975,18 @@ async function maybeUpdate(opts: Options, carry: Carry): Promise<boolean> {
     })
   } catch (error) {
     log(`harness update check skipped: ${error instanceof Error ? error.message : String(error)}`)
-    return false
+    return undefined
   }
   if (target.action === 'none') {
     if (target.reason) log(`harness update: ${target.reason}`)
-    return false
+    return undefined
   }
   const version = target.version
-  if (carry.updates.includes(version)) return false
+  if (carry.updates.includes(version)) return undefined
   if (target.action === 'notify') {
     carry.updates.push(version)
     notify(target.reason)
-    return false
+    return undefined
   }
   const forward = compareVersions(version, installed) > 0
   let canary: CanaryClaim | undefined
@@ -1993,7 +1996,7 @@ async function maybeUpdate(opts: Options, carry: Carry): Promise<boolean> {
         `would claim harness v${version} as canary (${target.why}) on its rollout issue, then update to it`,
       )
       carry.updates.push(version)
-      return false
+      return undefined
     }
     try {
       const issue = ensureRolloutIssue(repo, version, ROOT, rollouts.get(version)?.issue)
@@ -2004,7 +2007,7 @@ async function maybeUpdate(opts: Options, carry: Carry): Promise<boolean> {
         const claimed = await claim({ repo, issue, version, me }, config.update.canaryHours, ROOT)
         if (!claimed.won) {
           log(`harness v${version} was claimed first by ${claimed.holder ?? 'another project'}`)
-          return false
+          return undefined
         }
         canary = claimed.claim
         notify(
@@ -2013,7 +2016,7 @@ async function maybeUpdate(opts: Options, carry: Carry): Promise<boolean> {
       }
     } catch (error) {
       log(`harness canary claim skipped: ${error instanceof Error ? error.message : String(error)}`)
-      return false
+      return undefined
     }
   }
   /** The update did not reach the default branch: let the next loop test the release. */
@@ -2034,20 +2037,20 @@ async function maybeUpdate(opts: Options, carry: Carry): Promise<boolean> {
     try {
       takeUpdate(installed, version)
       carry.probation = probation
-      return true
+      return version
     } catch (error) {
       notify(
         `harness update to v${version} failed, the loop stays on v${installed}: ${error instanceof Error ? error.message : String(error)}`,
       )
       giveBack('the pull after the update failed')
-      return false
+      return undefined
     }
   }
   const branch = pinBranch(version, forward)
   if (sh('git', ['ls-remote', '--heads', remote(), `refs/heads/${branch}`], { quiet: true }).out) {
     log(`harness update: ${branch} is still open`)
     giveBack(`its update PR ${branch} is still open`)
-    return false
+    return undefined
   }
   carry.updates.push(version)
   if (opts.dryRun) {
@@ -2062,29 +2065,29 @@ async function maybeUpdate(opts: Options, carry: Carry): Promise<boolean> {
     log(
       `  ${config.project.init} with the L1 baseline; commit, push, PR; ${opts.autoMerge || config.merge === 'auto' ? 'auto-merge, wait, pull, pnpm install, restart' : 'then wait for a human merge'}`,
     )
-    return false
+    return undefined
   }
   const result = await pinPr(version, installed, opts, target.why)
   if (result.state === 'quarantined' && canary && result.pr) {
     settleCanary(canary, (c) => markQuarantined(c, result.pr!, ROOT))
-    return false
+    return undefined
   }
   if (result.state !== 'merged') {
     giveBack(
       result.state === 'waiting' ? 'its update PR waits for a human merge' : 'the update failed',
     )
-    return false
+    return undefined
   }
   try {
     takeUpdate(installed, version, result.pr)
     carry.probation = probation
-    return true
+    return version
   } catch (error) {
     notify(
       `harness pins moved to v${version} but the pull or install failed: ${error instanceof Error ? error.message : String(error)}`,
     )
     giveBack('the pull after the update failed')
-    return false
+    return undefined
   }
 }
 
@@ -2114,8 +2117,20 @@ function keepClaim(c: CanaryClaim | undefined) {
   renewTimer.unref()
 }
 
-/** Runs the loop again on the harness now installed in ROOT and waits for it. */
-function restart(carry: Carry): { code: number; signal: string | null; since: string } {
+/**
+ * Runs the loop again on the harness now installed in ROOT and waits for it. `expected` is the
+ * version the pins moved to: if ROOT has another one installed, the restart would run the wrong
+ * code, so it stops with an error instead.
+ */
+function restart(
+  carry: Carry,
+  expected: string,
+): { code: number; signal: string | null; since: string } {
+  const actual = installedVersion(ROOT)
+  if (actual !== expected)
+    throw new Error(
+      `after moving the pins to v${expected}, ${ROOT} has harness v${actual} installed; not restarting. Run pnpm install there and start the loop again`,
+    )
   const bin = installedBin(ROOT)
   const since = new Date().toISOString()
   log(`restarting the driver on harness ${path.relative(ROOT, bin)}`)
@@ -2392,9 +2407,26 @@ export async function loopCommand(argv: string[]): Promise<number> {
 
   const carried = process.env[CARRY_ENV]
   delete process.env[CARRY_ENV]
-  if (carried) log(`restarted on harness v${packageVersion()}`)
-  preflight(opts)
   const carry = readCarry(carried)
+  if (carried) log(`restarted on harness v${packageVersion()}`)
+  if (carry.probation && packageVersion() !== carry.probation.version) {
+    // Not the release on probation: settle it as such, so the supervisor does not blame it.
+    record({
+      ts: new Date().toISOString(),
+      feature: 'harness',
+      attempt: 1,
+      outcome: 'restart-mismatch',
+      costUsd: 0,
+      turns: 0,
+      minutes: 0,
+      trace: '',
+      note: `restarted on v${packageVersion()}, expected v${carry.probation.version}`,
+    })
+    throw new Error(
+      `restarted on harness v${packageVersion()} but v${carry.probation.version} is on probation; run pnpm install and start the loop again`,
+    )
+  }
+  preflight(opts)
   let consecutiveFailures = carry.consecutiveFailures
   let retros = carry.retros
   const attempted = new Set(carry.attempted)
@@ -2430,9 +2462,10 @@ export async function loopCommand(argv: string[]): Promise<number> {
 
   for (;;) {
     // No update while a re-test runs: it must run on the version it rolled back to.
-    if (!carry.retry && (await maybeUpdate(opts, carry))) {
+    const moved = carry.retry ? undefined : await maybeUpdate(opts, carry)
+    if (moved) {
       const probation = carry.probation
-      const child = restart(snapshot())
+      const child = restart(snapshot(), moved)
       await new Promise((resolve) => setImmediate(resolve)) // let a pending SIGINT handler run
       const verdict = supervise({
         code: child.code,
@@ -2581,7 +2614,7 @@ export async function loopCommand(argv: string[]): Promise<number> {
         // The restart blocks this process's timer; the restarted driver renews from the carry.
         keepClaim(undefined)
         settleCanary(probation.canary, (c) => renewClaim(c, config.update.canaryHours, ROOT))
-        return restart(snapshot()).code
+        return restart(snapshot(), probation.from).code
       }
     }
     if (retry) {

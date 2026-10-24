@@ -184,6 +184,19 @@
       "evidence": ["2026-10-24 pnpm check → pass (working tree on 67cb7be)"],
       "attempts": 0,
       "notes": "Requested 2026-10-24: harness-updater runs the loop with the owner token in its environment; a session that read injected text (issue, PR, trace) could have used gh as the owner. Sessions never need GitHub: the driver pushes, opens PRs and reads CI."
+    },
+    {
+      "id": "F-013",
+      "priority": 13,
+      "area": "loop",
+      "title": "Restart onto the version that was actually installed",
+      "user_visible_behavior": "After an update or rollback the driver restarts on the harness now installed in the project, resolved from the file system rather than the process module cache. It refuses to restart when the installed version is not the one the pins moved to, and a restarted driver that is not the version on probation records restart-mismatch and stops; the supervisor treats that as settled and neither rolls back nor quarantines.",
+      "status": "passing",
+      "depends_on": ["F-012"],
+      "verification": ["L1: pnpm check"],
+      "evidence": ["2026-10-24 pnpm check → pass (working tree on 36884f4)"],
+      "attempts": 0,
+      "notes": "Found 2026-10-24 in metsavahti: after updating to v0.3.2 and later v0.3.3 the driver logged restarted on harness v0.3.1. require.resolve returned the cached real path of the old package, so the child ran v0.3.1 code against v0.3.2 pins, failed the doctor with exit 1, and the supervisor rolled back and quarantined v0.3.2 (issue #11), a false alarm. Every release up to v0.3.4 has this restart bug in the parent, so projects need one hand update to the fix."
     }
   ]
 }

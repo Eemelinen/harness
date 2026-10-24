@@ -182,7 +182,13 @@ describe('supervise', () => {
   it('leaves a clean exit, an abort, a settled probation and no probation alone', () => {
     expect(supervise({ code: 0, aborted: false, probation, records: [] })).toBe('exit')
     expect(supervise({ code: 130, aborted: true, probation, records: [] })).toBe('exit')
-    for (const outcome of ['probation-ok', 'rolled-back', 'quarantined', 'probation-cleared'])
+    for (const outcome of [
+      'probation-ok',
+      'rolled-back',
+      'quarantined',
+      'probation-cleared',
+      'restart-mismatch',
+    ])
       expect(supervise({ code: 1, aborted: false, probation, records: [{ outcome }] })).toBe('exit')
     expect(supervise({ code: 1, aborted: false, records: [] })).toBe('exit')
   })
