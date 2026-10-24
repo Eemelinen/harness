@@ -301,9 +301,18 @@ head it pushed: GitHub reports `UNKNOWN` for a while after a push. Then the driv
    session counts as a CI fix attempt (`caps.maxCiFixAttempts`), and its commit goes through the same
    post-check, evaluator and merge gate as a CI fix before it is pushed.
 
-The driver gives up on the PR, as above, only when the merge cannot be made (no fetch, the branch
-already contains the default branch) or the fixer attempts run out. The reason then reads
-"conflicts with <default branch>: …", and an unfinished merge is aborted so the worktree is clean.
+The driver gives up on the PR, as above, only when:
+
+- the merge cannot be made (no fetch, the branch already contains the default branch, no push);
+- the fixer attempts run out (with `caps.maxCiFixAttempts` 0, at once);
+- the fixer leaves the merge to a human (`out_of_scope`: the two sides contradict each other) or
+  blocks the feature;
+- the evaluator returns Block on the resolution (the feature is blocked);
+- the merge gate holds the resolution for a human review, or its push fails.
+
+The reason then reads "conflicts with <default branch>: …" (after a fixer session, "conflicts with
+<default branch>: fix N/M: …"), never a CI stall. An unfinished merge is aborted before auto-merge
+is disabled and the branch is pushed, so the worktree a human takes over is clean.
 The update and rollback PRs (`pinPr`) have no fixer: on a conflict the driver disables their
 auto-merge and reports "conflicts with <default branch>".
 

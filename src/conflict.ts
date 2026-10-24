@@ -4,8 +4,11 @@
  * CONFLICTING` in its poll and calls mergeDefaultBranch here, which merges the default branch into
  * the feature branch in its worktree. A clean merge is checked with L1 and pushed; a merge with
  * conflicts stays in progress for a fixer session (prompts/conflict-fixer.md), and so does a clean
- * merge that fails L1 (docs/how-it-works.md → When CI fails).
+ * merge that fails L1 (docs/how-it-works.md → When CI fails). The decisions shepherdPr takes on that
+ * path (conflictStep, nextFixAttempt, fixerPrompt, fixNote, fixerGaveUp) are pure functions here, so
+ * they are tested without a session; every give-up on it starts with "conflicts with <default branch>".
  */
+import { describeChecks, type CiCheck } from './ci'
 import { sh } from './run'
 
 export interface BaseMergeSpec {
@@ -91,4 +94,112 @@ export function abortMerge(dir: string): boolean {
   })
   if (inProgress.code !== 0) return false
   return sh('git', ['merge', '--abort'], { cwd: dir, quiet: true }).code === 0
+}
+
+/** How every give-up reason on the conflict path starts; it is never reported as a CI stall. */
+export const conflictsWith = (defaultBranch: string) => `conflicts with ${defaultBranch}`
+
+export interface ConflictContext {
+  remote: string
+  defaultBranch: string
+  /** `project.init`, the L1 baseline the driver ran on a clean merge. */
+  init: string
+}
+
+/** What shepherdPr does with a mergeDefaultBranch result. */
+export type ConflictStep =
+  /** Pushed: wait for CI again; a later conflict counts only for `head`. */
+  | { action: 'wait'; head: string; log: string }
+  /** Start a fixer session: `problem` is its prompt's PROBLEM, `evidence` goes on the PR at a give-up. */
+  | { action: 'fix'; problem: string; evidence: string; log: string }
+  | { action: 'give-up'; reason: string }
+
+export function conflictStep(merged: BaseMerge, c: ConflictContext): ConflictStep {
+  const target = `${c.remote}/${c.defaultBranch}`
+  switch (merged.state) {
+    case 'pushed':
+      return {
+        action: 'wait',
+        head: merged.head,
+        log: `merged ${target} cleanly, L1 passed, pushed; auto-merge is still armed`,
+      }
+    case 'failed':
+      return { action: 'give-up', reason: `${conflictsWith(c.defaultBranch)}: ${merged.reason}` }
+    case 'conflicts': {
+      const evidence = merged.files.map((f) => `- ${f}`).join('\n')
+      return {
+        action: 'fix',
+        problem: `The merge stopped with conflicts in these files; it is still in progress (\`git status\`):\n\n${evidence}`,
+        evidence,
+        log: `merge conflicts in: ${merged.files.join(', ')}`,
+      }
+    }
+    case 'check-failed':
+      return {
+        action: 'fix',
+        problem: `The merge had no textual conflicts and is committed, but \`bash ${c.init}\` (the L1 baseline) fails on it: the two sides do not fit together yet. Output tail:\n\n\`\`\`\n${merged.output}\n\`\`\``,
+        evidence: merged.output,
+        log: `merged ${target} cleanly, but ${c.init} fails on the merge`,
+      }
+  }
+}
+
+/** What a fixer session in shepherdPr works on; `conflictWith` (the default branch) marks a merge. */
+export interface FixTarget {
+  attempt: number
+  max: number
+  /** The failed checks' names, for red CI. */
+  failed: string
+  conflictWith?: string
+}
+
+/**
+ * Before each fixer session: the next attempt, or the give-up reason once `caps.maxCiFixAttempts`
+ * sessions ran. A conflict uses the same budget as red CI.
+ */
+export function nextFixAttempt(t: FixTarget): { attempt: number } | { giveUp: string } {
+  if (t.attempt < t.max) return { attempt: t.attempt + 1 }
+  if (!t.conflictWith)
+    return { giveUp: `CI still failing after ${t.max} fix attempt(s): ${t.failed}` }
+  const prefix = conflictsWith(t.conflictWith)
+  return {
+    giveUp:
+      t.max === 0
+        ? `${prefix}: no fixer session may resolve it (caps.maxCiFixAttempts is 0)`
+        : `${prefix}: still unresolved after ${t.max} fix attempt(s)`,
+  }
+}
+
+/** The fixer's prompt file and the variables only it uses. */
+export function fixerPrompt(s: { problem?: string; failed: CiCheck[]; evidence: string }): {
+  file: 'ci-fixer.md' | 'conflict-fixer.md'
+  vars: Record<string, string>
+} {
+  if (s.problem !== undefined) return { file: 'conflict-fixer.md', vars: { PROBLEM: s.problem } }
+  return {
+    file: 'ci-fixer.md',
+    vars: { FAILED_CHECKS: describeChecks(s.failed), LOG_EXCERPT: s.evidence },
+  }
+}
+
+/** A fixer session's run-record note or give-up reason; `t.attempt` is the session's number. */
+export function fixNote(t: FixTarget, text: string): string {
+  const note = t.conflictWith
+    ? `${conflictsWith(t.conflictWith)}: fix ${t.attempt}/${t.max}: ${text}`
+    : `ci fix ${t.attempt}/${t.max}: ${text}`
+  return note.slice(0, 500)
+}
+
+/** Why the driver gives up after decideCiFix said `give-up` (the fixer blocked the feature or declined). */
+export function fixerGaveUp(
+  t: FixTarget,
+  s: { id: string; blockedNotes?: string; reason: string },
+): string {
+  const why =
+    s.blockedNotes !== undefined
+      ? `the fixer blocked ${s.id}: ${s.blockedNotes.slice(-300)}`
+      : t.conflictWith
+        ? `the fixer left the merge to a human: ${s.reason}`
+        : `the fixer judged the failure out of scope: ${s.reason}`
+  return fixNote(t, why)
 }

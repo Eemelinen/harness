@@ -38,6 +38,29 @@ this file to change on every branch; keep that heading text exactly.
 
 ## Session Log
 
+### Session 006 — 2026-10-24 (F-016 attempt 2, driver-run)
+
+- The evaluator's Revise on attempt 1: the shepherdPr conflict path, pinPr's conflict outcome and
+  giveUp's merge abort had no test. Chose the evaluator's second option, pure decision functions,
+  over driving shepherdPr itself (it needs the driver's module state, `claude` sessions, the
+  evaluator and the merge gate). The conflict path in shepherdPr is now glue around
+  `src/conflict.ts`: `conflictStep` (merge result → wait on the pushed head / fix with PROBLEM /
+  give up), `nextFixAttempt` (a conflict uses the `caps.maxCiFixAttempts` budget), `fixerPrompt`
+  (conflict-fixer.md vs ci-fixer.md), `fixNote` and `fixerGaveUp`. giveUp's worktree part is
+  `handBack` (abort the merge, disable auto-merge, push) and pinPr's failure is `pinPrFailed`, both
+  exported from `src/loop.ts` and tested with `gh` (and `claude`) stubbed on PATH.
+- Give-up reasons after a conflict fixer session now start with "conflicts with <default branch>:
+  fix N/M: …" (attempt 1 had "ci fix N/M: conflicts with …"); the review-hold and push-failure
+  give-ups after a fixer session carry the same note prefix (for CI: "ci fix N/M: …"). With
+  `caps.maxCiFixAttempts` 0 a conflict reads "no fixer session may resolve it".
+- Tests (`tests/conflict.test.ts`): a clean merge yields `wait` on the pushed head; conflicts reach
+  the conflict-fixer prompt with the files in PROBLEM; a clean merge failing L1 goes to the same
+  fixer; the budget and every conflict give-up reason; `handBack` aborts the merge before
+  `gh pr merge --disable-auto` (the stub records the worktree state) and pushes only when that
+  succeeded; `pinPrFailed` disables auto-merge, reports "conflicts with main", runs no `claude`.
+  A mutation check (handBack without the abort) fails the test. docs/how-it-works.md lists every
+  give-up case of the conflict path.
+
 ### Session 005 — 2026-10-24 (F-016, driver-run)
 
 - F-016 (retro issue #21): `waitForMerge()` reads `mergeable` and `headRefOid` in its `gh pr view`
