@@ -104,6 +104,9 @@ loops. These layers keep it contained:
   release first.
 - **Per project:** the update PR's selftest against the installed version, its doctor and L1
   baseline, and the project's CI.
+- **Probation:** the first feature on a new release. If it fails, the project rolls back and re-runs
+  the feature on the old release. A failure caused by the release costs the project one extra
+  feature run, not the feature's attempts.
 - **Quarantine:** a release found bad is held back from every project, and projects already on it
   move off it ([how-it-works.md](how-it-works.md#4-operating-the-loop)).
 

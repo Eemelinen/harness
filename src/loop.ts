@@ -20,7 +20,10 @@
  * With `update.auto`, before each feature the driver moves to the harness release pickTarget chooses
  * (src/update.ts: old enough, not breaking, not quarantined) through its own pin-only PR, after the
  * new version's selftest showed no regression; then it restarts itself on that version. See
- * maybeUpdate and pinPr.
+ * maybeUpdate and pinPr. The first feature on the new version runs on probation: if it does not
+ * pass, the run is set aside, the pins roll back and the feature runs again on the old version,
+ * which quarantines the release when it passes there. The previous driver waits for the restarted
+ * one and rolls back when it crashes before that (supervise).
  */
 import { spawn, spawnSync } from 'node:child_process'
 import {
@@ -594,6 +597,8 @@ interface RunRecord {
     | 'updated'
     | 'rolled-back'
     | 'quarantined'
+    | 'probation-ok'
+    | 'probation-cleared'
   verdict?: string
   pr?: string
   costUsd: number
@@ -618,16 +623,21 @@ export function withHarnessVersion<T extends object>(
   return { ...rec, harness: rec.harness ?? version }
 }
 
-function report() {
+function readRunRecords(): RunRecord[] {
   const file = path.join(ROOT, config.runsLog)
-  if (!existsSync(file)) {
-    console.log('no runs recorded yet')
-    return
-  }
-  const rows = readFileSync(file, 'utf8')
+  if (!existsSync(file)) return []
+  return readFileSync(file, 'utf8')
     .split('\n')
     .filter(Boolean)
     .map((l) => JSON.parse(l) as RunRecord)
+}
+
+function report() {
+  const rows = readRunRecords()
+  if (rows.length === 0) {
+    console.log('no runs recorded yet')
+    return
+  }
   console.log('when              feature attempt outcome  verdict  turns  cost   min  harness  pr')
   for (const r of rows) {
     console.log(
@@ -1600,9 +1610,65 @@ export interface Carry {
   consecutiveFailures: number
   /** Releases this run already updated to, tried to, or reported; each is handled once. */
   updates: string[]
+  /** Set when an update merged: the first feature on `version` decides whether it stays. */
+  probation?: { version: string; from: string }
+  /** Set after a probation rollback: `feature` runs again on `from` to test `suspect`. */
+  retry?: Retry
+}
+
+export interface Retry {
+  feature: string
+  suspect: string
+  from: string
+  evidence: string[]
+  /** The retro issue the feature came from; its feature exists only on the set-aside branch. */
+  intake?: IntakeItem
 }
 
 export const CARRY_ENV = 'HARNESS_LOOP_CARRY'
+
+/**
+ * What the first feature after an update says about the release: `passed` keeps it, `suspect`
+ * rolls back and re-tests, `pending` (an aborted run) decides nothing.
+ */
+export function probationResult(
+  outcome: IterationOutcome | 'error',
+): 'passed' | 'suspect' | 'pending' {
+  if (outcome === 'done') return 'passed'
+  if (outcome === 'aborted') return 'pending'
+  return 'suspect'
+}
+
+/** Outcomes that settle a probation; a restarted driver that wrote none of them did not finish one. */
+const PROBATION_SETTLED = new Set([
+  'probation-ok',
+  'rolled-back',
+  'quarantined',
+  'probation-cleared',
+])
+
+/**
+ * After a restarted driver exits: `rollback` when it ran a release on probation and exited with an
+ * error before settling it (it crashed on the new version), else `exit` with its code.
+ */
+export function supervise(s: {
+  code: number
+  aborted: boolean
+  probation?: { version: string; from: string }
+  records: { outcome: string }[]
+}): 'exit' | 'rollback' {
+  if (!s.probation || s.aborted || s.code === 0) return 'exit'
+  return s.records.some((r) => PROBATION_SETTLED.has(r.outcome)) ? 'exit' : 'rollback'
+}
+
+/** The feature to re-test after a probation rollback, if it is still there. */
+export function retryFeature(retry: Retry | undefined, list: { features: Feature[] }) {
+  if (!retry) return undefined
+  return retry.intake?.feature ?? list.features.find((f) => f.id === retry.feature)
+}
+
+/** Where a probation run's branch is kept for inspection, out of the feature queue. */
+export const asideBranch = (version: string, id: string) => `harness/probation-v${version}-${id}`
 
 export function readCarry(raw: string | undefined): Carry {
   const empty: Carry = {
@@ -1888,11 +1954,15 @@ async function maybeUpdate(opts: Options, carry: Carry): Promise<boolean> {
     notify(target.reason)
     return false
   }
+  const forward = compareVersions(version, installed) > 0
+  const probation = forward ? { version, from: installed } : undefined
   if (!opts.dryRun && defaultBranchPins(version)) {
     carry.updates.push(version)
     log(`${defaultBranch()} already pins harness v${version}; pulling it`)
     try {
-      return takeUpdate(installed, version)
+      takeUpdate(installed, version)
+      carry.probation = probation
+      return true
     } catch (error) {
       notify(
         `harness update to v${version} failed, the loop stays on v${installed}: ${error instanceof Error ? error.message : String(error)}`,
@@ -1900,7 +1970,6 @@ async function maybeUpdate(opts: Options, carry: Carry): Promise<boolean> {
       return false
     }
   }
-  const forward = compareVersions(version, installed) > 0
   const branch = pinBranch(version, forward)
   if (sh('git', ['ls-remote', '--heads', remote(), `refs/heads/${branch}`], { quiet: true }).out) {
     log(`harness update: ${branch} is still open`)
@@ -1924,7 +1993,9 @@ async function maybeUpdate(opts: Options, carry: Carry): Promise<boolean> {
   const result = await pinPr(version, installed, opts, target.why)
   if (result.state !== 'merged') return false
   try {
-    return takeUpdate(installed, version, result.pr)
+    takeUpdate(installed, version, result.pr)
+    carry.probation = probation
+    return true
   } catch (error) {
     notify(
       `harness pins moved to v${version} but the pull or install failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -1933,16 +2004,126 @@ async function maybeUpdate(opts: Options, carry: Carry): Promise<boolean> {
   }
 }
 
-/** Runs the loop again on the harness now installed in ROOT and returns its exit code. */
-function restart(carry: Carry): number {
+/** Runs the loop again on the harness now installed in ROOT and waits for it. */
+function restart(carry: Carry): { code: number; signal: string | null; since: string } {
   const bin = installedBin(ROOT)
+  const since = new Date().toISOString()
   log(`restarting the driver on harness ${path.relative(ROOT, bin)}`)
   const child = spawnSync(process.execPath, [bin, ...process.argv.slice(2)], {
     cwd: process.cwd(),
     stdio: 'inherit',
     env: { ...process.env, [CARRY_ENV]: JSON.stringify(carry) },
   })
-  return child.status ?? 1
+  return { code: child.status ?? 1, signal: child.signal, since }
+}
+
+/**
+ * Keeps a probation run's branch for inspection as asideBranch() and takes it out of the queue:
+ * the feature branch is deleted on the remote and locally with its worktree, so its attempts and
+ * any auto-block on it do not count against the feature.
+ */
+function setAside(id: string, version: string): string {
+  const branch = branchFor(id)
+  const aside = asideBranch(version, id)
+  const local = sh('git', ['rev-parse', '--verify', '--quiet', branch], { quiet: true }).code === 0
+  if (local) {
+    const pushed = sh(
+      'git',
+      ['push', '--force', remote(), `refs/heads/${branch}:refs/heads/${aside}`],
+      {
+        quiet: true,
+      },
+    )
+    log(
+      pushed.code === 0
+        ? `kept ${id}'s probation run as ${aside}`
+        : `could not push ${aside}: ${pushed.err}`,
+    )
+  }
+  sh('git', ['push', remote(), '--delete', branch], { quiet: true })
+  removeWorktree(id)
+  return aside
+}
+
+/** The run records of `id` on `version`, as evidence lines. */
+function runEvidence(id: string, version: string, since?: string): string[] {
+  return readRunRecords()
+    .filter((r) => r.feature === id && r.harness === version && (!since || r.ts >= since))
+    .map(
+      (r) =>
+        `${id} attempt ${r.attempt} on v${version}: ${r.outcome}${r.verdict ? ` (${r.verdict})` : ''}${r.note ? ` — ${r.note.slice(0, 200)}` : ''}${r.trace ? ` · trace \`${path.relative(ROOT, r.trace)}\`` : ''}`,
+    )
+}
+
+/** Quarantines `version`; a failure to file is notified, never thrown. */
+function quarantineRelease(r: Parameters<typeof quarantine>[1]): void {
+  try {
+    const filed = quarantine(project, r)
+    record({
+      ts: new Date().toISOString(),
+      feature: 'harness',
+      attempt: 1,
+      outcome: 'quarantined',
+      pr: filed.url,
+      costUsd: 0,
+      turns: 0,
+      minutes: 0,
+      trace: '',
+      note: `v${r.version}: ${r.cause} (${filed.action})`,
+    })
+    notify(`harness v${r.version} quarantined: ${r.cause} — ${filed.url}`)
+  } catch (error) {
+    notify(
+      `harness v${r.version} should be quarantined (${r.cause}) but filing failed: ${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
+}
+
+/**
+ * The restarted driver exited with an error before it settled its probation: the new version
+ * crashed. This driver (the previous version) rolls back, then checks that its own preflight
+ * passes; only then is the new version to blame and quarantined. False stops the loop.
+ */
+async function rollbackCrashed(
+  opts: Options,
+  probation: { version: string; from: string },
+  child: { code: number; since: string },
+): Promise<boolean> {
+  const { version, from } = probation
+  notify(
+    `the driver on harness v${version} exited with code ${child.code} before its first feature settled; rolling back to v${from}`,
+  )
+  const moved = await pinPr(
+    from,
+    version,
+    opts,
+    `the driver on v${version} exited with code ${child.code}`,
+  )
+  if (moved.state !== 'merged') {
+    notify(`the rollback to v${from} did not merge; stopping the loop`)
+    return false
+  }
+  takeUpdate(version, from, moved.pr)
+  try {
+    preflight(opts)
+  } catch (error) {
+    notify(
+      `preflight fails on v${from} too (${error instanceof Error ? error.message : String(error)}); v${version} is not quarantined and the loop stops`,
+    )
+    return false
+  }
+  quarantineRelease({
+    version,
+    from,
+    cause: `the loop driver exits with code ${child.code}`,
+    evidence: [
+      `the loop driver on v${version} exited with code ${child.code} before its first feature settled; the preflight of v${from} passes in the same checkout`,
+      ...readRunRecords()
+        .filter((r) => r.ts >= child.since && r.harness === version)
+        .map((r) => `${r.feature}: ${r.outcome}${r.note ? ` — ${r.note.slice(0, 200)}` : ''}`),
+    ],
+  })
+  return true
 }
 
 // ---------------------------------------------------------------------------------------
@@ -2075,51 +2256,81 @@ export async function loopCommand(argv: string[]): Promise<number> {
     return true
   }
 
+  const snapshot = (): Carry => ({
+    ...carry,
+    attempted: [...attempted],
+    intakeIssues: [...intakeIssues],
+    retros,
+    consecutiveFailures,
+  })
+
   for (;;) {
-    if (await maybeUpdate(opts, carry))
-      return restart({
-        attempted: [...attempted],
-        intakeIssues: [...intakeIssues],
-        retros,
-        consecutiveFailures,
-        updates: carry.updates,
+    // No update while a re-test runs: it must run on the version it rolled back to.
+    if (!carry.retry && (await maybeUpdate(opts, carry))) {
+      const probation = carry.probation
+      const child = restart(snapshot())
+      await new Promise((resolve) => setImmediate(resolve)) // let a pending SIGINT handler run
+      const verdict = supervise({
+        code: child.code,
+        aborted: aborting || child.signal !== null,
+        probation,
+        records: readRunRecords().filter((r) => r.ts >= child.since),
       })
+      if (verdict === 'exit' || !probation) return child.code
+      carry.probation = undefined
+      if (!(await rollbackCrashed(opts, probation, child))) break
+      continue
+    }
     if (aborting) break
     const list = readFeatureList(project.resolve(config.project.featureList), config.features)
     const inFlight = inFlightIds()
     let feature: Feature | undefined
     let intake: IntakeItem | undefined
-    if (!opts.feature && config.retro.intake) {
-      try {
-        const ids = [...list.features.map((f) => f.id), ...inFlight]
-        const priority = Math.max(0, ...list.features.map((f) => f.priority))
-        intake = nextIntake(project, ids, priority)
-        // Dry run: nothing is queued, so the same issue would come back every iteration.
-        if (intake && intakeIssues.has(intake.issue)) intake = undefined
-      } catch (error) {
-        log(`retro intake skipped: ${error instanceof Error ? error.message : String(error)}`)
+    const retry = carry.retry
+    if (retry) {
+      feature = retryFeature(retry, list)
+      intake = retry.intake
+      if (!feature) {
+        log(`re-test of ${retry.feature} skipped: it is no longer in the feature list`)
+        carry.retry = undefined
+        continue
       }
-    }
-    if (intake) {
-      feature = intake.feature
-      intakeIssues.add(intake.issue)
-      log(`retro intake: ${intake.url} → ${feature.id} — ${feature.title}`)
-      if (!opts.dryRun) markQueued(project, intake, branchFor(feature.id))
-    } else if (opts.feature) {
-      feature = list.features.find((f) => f.id === opts.feature)
-      if (!feature) throw new Error(`unknown feature ${opts.feature}`)
-      if (!isReady(feature, list)) {
-        const byId = new Map(list.features.map((f) => [f.id, f]))
-        const waiting = feature.depends_on.filter((d) => byId.get(d)?.status !== 'passing')
-        throw new Error(
-          `${opts.feature} is not ready: status ${feature.status}` +
-            (waiting.length ? `, waiting on ${waiting.join(', ')}` : ''),
-        )
-      }
-      if (isHumanOnly(feature))
-        throw new Error(`${opts.feature} has manual verification steps; run it interactively`)
+      log(
+        `=== re-test: ${feature.id} on harness v${packageVersion()} (it did not pass on v${retry.suspect})`,
+      )
     } else {
-      feature = nextReadyFeature(list, { exclude: [...inFlight, ...attempted] })
+      if (!opts.feature && config.retro.intake) {
+        try {
+          const ids = [...list.features.map((f) => f.id), ...inFlight]
+          const priority = Math.max(0, ...list.features.map((f) => f.priority))
+          intake = nextIntake(project, ids, priority)
+          // Dry run: nothing is queued, so the same issue would come back every iteration.
+          if (intake && intakeIssues.has(intake.issue)) intake = undefined
+        } catch (error) {
+          log(`retro intake skipped: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
+      if (intake) {
+        feature = intake.feature
+        intakeIssues.add(intake.issue)
+        log(`retro intake: ${intake.url} → ${feature.id} — ${feature.title}`)
+        if (!opts.dryRun) markQueued(project, intake, branchFor(feature.id))
+      } else if (opts.feature) {
+        feature = list.features.find((f) => f.id === opts.feature)
+        if (!feature) throw new Error(`unknown feature ${opts.feature}`)
+        if (!isReady(feature, list)) {
+          const byId = new Map(list.features.map((f) => [f.id, f]))
+          const waiting = feature.depends_on.filter((d) => byId.get(d)?.status !== 'passing')
+          throw new Error(
+            `${opts.feature} is not ready: status ${feature.status}` +
+              (waiting.length ? `, waiting on ${waiting.join(', ')}` : ''),
+          )
+        }
+        if (isHumanOnly(feature))
+          throw new Error(`${opts.feature} has manual verification steps; run it interactively`)
+      } else {
+        feature = nextReadyFeature(list, { exclude: [...inFlight, ...attempted] })
+      }
     }
     if (!feature) {
       // A retro may file issues the intake picks up; look again before stopping.
@@ -2128,8 +2339,98 @@ export async function loopCommand(argv: string[]): Promise<number> {
       break
     }
     attempted.add(feature.id)
-    const outcome = await runFeature(feature, opts, intake)
+    const probation = carry.probation
+    const started = new Date().toISOString()
+    let outcome: IterationOutcome | 'error'
+    let failure: string | undefined
+    try {
+      outcome = await runFeature(feature, opts, intake)
+    } catch (error) {
+      if (!probation && !retry) throw error
+      outcome = 'error'
+      failure = error instanceof Error ? error.message : String(error)
+      log(`${feature.id}: driver error — ${failure}`)
+    }
     if (outcome === 'aborted') break
+
+    if (probation) {
+      const result = probationResult(outcome)
+      if (result === 'passed') {
+        carry.probation = undefined
+        log(`harness v${probation.version} passed its probation on ${feature.id}`)
+        record({
+          ts: new Date().toISOString(),
+          feature: 'harness',
+          attempt: 1,
+          outcome: 'probation-ok',
+          costUsd: 0,
+          turns: 0,
+          minutes: 0,
+          trace: '',
+          note: `${feature.id} passed on v${probation.version}`,
+        })
+      } else if (result === 'suspect') {
+        carry.probation = undefined
+        const evidence = [
+          ...runEvidence(feature.id, probation.version, started),
+          ...(failure ? [`${feature.id} on v${probation.version}: driver error — ${failure}`] : []),
+        ]
+        evidence.push(`the run is kept as branch \`${setAside(feature.id, probation.version)}\``)
+        notify(
+          `${feature.id} ${outcome} on harness v${probation.version}, its first feature after the update; rolling back to v${probation.from} to re-test it there`,
+        )
+        const moved = await pinPr(
+          probation.from,
+          probation.version,
+          opts,
+          `v${probation.version} failed its probation on ${feature.id}`,
+        )
+        if (moved.state !== 'merged') {
+          notify(
+            `the rollback to v${probation.from} did not merge; stopping the loop so nothing more runs on v${probation.version}`,
+          )
+          break
+        }
+        takeUpdate(probation.version, probation.from, moved.pr)
+        attempted.delete(feature.id)
+        carry.retry = {
+          feature: feature.id,
+          suspect: probation.version,
+          from: probation.from,
+          evidence,
+          intake,
+        }
+        return restart(snapshot()).code
+      }
+    }
+    if (retry) {
+      carry.retry = undefined
+      const evidence = [...retry.evidence, ...runEvidence(feature.id, packageVersion(), started)]
+      if (outcome === 'done') {
+        quarantineRelease({
+          version: retry.suspect,
+          from: retry.from,
+          cause: `${feature.id} did not pass on v${retry.suspect} and passed on v${retry.from}`,
+          evidence: [...evidence, `${feature.id} on v${retry.from}: done`],
+        })
+      } else {
+        record({
+          ts: new Date().toISOString(),
+          feature: 'harness',
+          attempt: 1,
+          outcome: 'probation-cleared',
+          costUsd: 0,
+          turns: 0,
+          minutes: 0,
+          trace: '',
+          note: `${feature.id} did not pass on v${retry.from} either; v${retry.suspect} is not to blame`,
+        })
+        notify(
+          `${feature.id} did not pass on v${retry.from} either, so harness v${retry.suspect} is not to blame; a later loop run may take it again`,
+        )
+      }
+      if (failure) throw new Error(failure)
+    }
     if (!opts.dryRun) countFeatureRun(project)
     retroIfDue('every')
     consecutiveFailures = outcome === 'done' ? 0 : consecutiveFailures + 1

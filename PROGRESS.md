@@ -13,8 +13,8 @@ this file to change on every branch; keep that heading text exactly.
 - The repository runs its own loop: features come from `harness-retro` issues filed by project
   retros (docs/self-improvement.md). Merges that change a shipped path are released by
   `.github/workflows/release.yml` (docs/developing.md → Releasing); it needs the `RELEASE_TOKEN` secret.
-- Last verified: F-005 on this branch, `pnpm check` green on 2026-10-24.
-- Highest-priority unfinished feature: none (F-000…F-005 passing).
+- Last verified: F-008 on this branch, `pnpm check` green on 2026-10-24.
+- Highest-priority unfinished feature: none (F-000…F-008 passing).
 - Current blocker: none.
 
 ## Next Steps
@@ -24,16 +24,19 @@ this file to change on every branch; keep that heading text exactly.
    a workflow, so it waits for a human. The merge should release v0.3.1 on its own; check the
    Actions run.
 2. Move the projects to that release once (`pnpm harness:update`, then `pnpm check` and a commit).
-   After that, set `"update": { "auto": true }` in each project that runs `merge: "auto"` and watch the
-   first update-and-restart in its loop log.
+   Then turn on `"update": { "auto": true, "minAgeHours": 0 }` in one canary project only, and run
+   the drill: an update ends in `probation-ok`; a quarantine issue opened by hand makes it roll back;
+   closing the issue as not planned lifts it. After that, turn on `"update": { "auto": true }` in the
+   other projects that run `merge: "auto"`.
 3. Build open `harness-retro` issues as they arrive (`pnpm harness:loop`, intake picks them up).
 
 ## Session Log
 
-### Session 003 — 2026-10-24 (automatic releases, project updates)
+### Session 003 — 2026-10-24 (automatic releases, project updates, rollout safety)
 
-- Goal: release every merge that changes the package (F-004) and let project loops move to the
-  newest release before each feature (F-005), both requested by hand.
+- Goal: release every merge that changes the package (F-004), and let project loops move to the
+  newest release before each feature (F-005). Then make that rollout safe enough to run unattended
+  across projects (F-006…F-008). All were requested by hand.
 - F-004: `scripts/release.ts` (not `src/`: repository tooling, not shipped) bumps the patch number,
   or the minor number for a `!`/`BREAKING CHANGE` commit while 0.x; it releases nothing when no
   `package.json` `files` path changed. `release.yml` runs it after CI passes on a push to main and
@@ -60,9 +63,19 @@ this file to change on every branch; keep that heading text exactly.
   (`harness/rollback-vX`). The update PR runs the old and the new selftest, and a regression
   quarantines the release through `src/quarantine.ts`. That issue carries a feature block for this
   repo's intake, with one fingerprint per version. Verification: `pnpm harness:verify F-007`.
+- F-008 (part 3 of 3): the first feature after an update runs on probation. If it isn't `done`, the
+  run is set aside as `harness/probation-vX-F-NNN` (its attempts don't count), the pins roll back
+  through `pinPr`, and the driver restarts and re-runs the feature (`carry.retry`). Passing on the
+  old version quarantines the release; failing again clears it. The parent driver supervises the
+  restarted one. A non-zero exit with no settled probation means a rollback, then the old preflight
+  as an A/B check, then quarantine. Verification: `pnpm harness:verify F-008`.
+- Bootstrapping: rollback and re-test run in the version a project rolls back to, so they are
+  complete only from the release after the one that ships F-008. Until then the staged rollout and
+  the selftest (F-007) are the guard.
 - `src/update.ts` and `scripts/release.ts` were added to this repository's reviewPaths: one decides
   which update PRs skip a project's merge gate, the other runs with a token that can push to main.
-- Known risk: neither the release workflow nor a real update-and-restart has run yet. They need
+- Known risk: neither the release workflow nor a real update, rollback or quarantine has run yet;
+  only their decision logic is unit-tested. They need
   the `RELEASE_TOKEN` secret, a merge, and a project loop with `update.auto` on. The changelog is
   now a list of commit subjects instead of curated prose.
 

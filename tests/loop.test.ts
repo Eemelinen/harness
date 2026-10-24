@@ -5,11 +5,15 @@ import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 import {
+  asideBranch,
   mergeResult,
   pinBranch,
   pluginDir,
   queueEmptyNotice,
+  probationResult,
   readCarry,
+  retryFeature,
+  supervise,
   withHarnessVersion,
 } from '../src/loop'
 
@@ -131,5 +135,71 @@ describe('withHarnessVersion', () => {
     expect(withHarnessVersion({ feature: 'F-001', harness: '0.3.0' }, '0.3.1').harness).toBe(
       '0.3.0',
     )
+  })
+})
+
+describe('probation', () => {
+  it('keeps a release whose first feature is done and suspects it otherwise', () => {
+    expect(probationResult('done')).toBe('passed')
+    expect(probationResult('failed')).toBe('suspect')
+    expect(probationResult('blocked')).toBe('suspect')
+    expect(probationResult('error')).toBe('suspect')
+    expect(probationResult('aborted')).toBe('pending')
+  })
+
+  it('keeps the run of a suspect release apart from the feature branch', () => {
+    expect(asideBranch('0.3.5', 'F-012')).toBe('harness/probation-v0.3.5-F-012')
+  })
+
+  it('carries probation and the re-test across a restart', () => {
+    const carry = {
+      attempted: [],
+      intakeIssues: [],
+      retros: 0,
+      consecutiveFailures: 0,
+      updates: ['0.3.5'],
+      probation: { version: '0.3.5', from: '0.3.4' },
+      retry: { feature: 'F-012', suspect: '0.3.5', from: '0.3.4', evidence: ['F-012: failed'] },
+    }
+    expect(readCarry(JSON.stringify(carry))).toEqual(carry)
+  })
+})
+
+describe('supervise', () => {
+  const probation = { version: '0.3.5', from: '0.3.4' }
+
+  it('rolls back when the restarted driver errors before its probation settles', () => {
+    expect(supervise({ code: 1, aborted: false, probation, records: [] })).toBe('rollback')
+    expect(
+      supervise({ code: 1, aborted: false, probation, records: [{ outcome: 'failed' }] }),
+    ).toBe('rollback')
+  })
+
+  it('leaves a clean exit, an abort, a settled probation and no probation alone', () => {
+    expect(supervise({ code: 0, aborted: false, probation, records: [] })).toBe('exit')
+    expect(supervise({ code: 130, aborted: true, probation, records: [] })).toBe('exit')
+    for (const outcome of ['probation-ok', 'rolled-back', 'quarantined', 'probation-cleared'])
+      expect(supervise({ code: 1, aborted: false, probation, records: [{ outcome }] })).toBe('exit')
+    expect(supervise({ code: 1, aborted: false, records: [] })).toBe('exit')
+  })
+})
+
+describe('retryFeature', () => {
+  const feature = (id: string) =>
+    ({ id, title: id, depends_on: [], status: 'not_started' }) as unknown as Parameters<
+      typeof retryFeature
+    >[1]['features'][number]
+  const retry = { feature: 'F-012', suspect: '0.3.5', from: '0.3.4', evidence: [] }
+
+  it('re-tests the feature from the list, or the retro feature it came from', () => {
+    const list = { features: [feature('F-011'), feature('F-012')] }
+    expect(retryFeature(retry, list)?.id).toBe('F-012')
+    const intake = { issue: 5, url: 'u', repo: 'r', feature: feature('F-020'), safety: false }
+    expect(retryFeature({ ...retry, feature: 'F-020', intake }, list)?.id).toBe('F-020')
+  })
+
+  it('has nothing to re-test without a retry or once the feature is gone', () => {
+    expect(retryFeature(undefined, { features: [feature('F-012')] })).toBeUndefined()
+    expect(retryFeature(retry, { features: [feature('F-011')] })).toBeUndefined()
   })
 })

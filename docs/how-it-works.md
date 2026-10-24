@@ -166,6 +166,30 @@ project and kept away from the others:
 4. **Restart.** Once it merges, the driver pulls, runs `pnpm install` and restarts itself on the new
    version. The features it already tried, the retro count and the failure count carry over.
 
+**Probation.** The first feature after an update runs on probation, and what happens next depends on
+how it ends:
+
+- **It ends `done`:** the release stays (`probation-ok`).
+- **It fails, is blocked or hits a driver error:** the release is suspect.
+  1. The driver keeps that run as branch `harness/probation-vX.Y.Z-F-NNN` and deletes the feature
+     branch, so the attempt and any auto-block don't count against the feature.
+  2. It rolls back to the previous release through a `harness/rollback-vX.Y.Z` PR.
+  3. It restarts on the old version and runs the same feature again.
+
+  The re-test decides:
+  - **Passes on the old version:** the release was the cause, and it's quarantined with both
+    outcomes as evidence.
+  - **Fails again:** the feature is the problem and the release is cleared (`probation-cleared`).
+    A later loop run may take it again.
+
+If the restarted driver itself exits with an error before its first feature settles, the previous
+driver, which is still waiting for it, rolls back. It runs its own preflight on the old version and
+quarantines the release only when that passes, so an environment problem doesn't count against the
+release. A rollback that can't auto-merge stops the loop, so nothing more runs on a suspect release.
+
+These steps run in the version the project rolls back to. They are complete only in projects whose
+previous release already has them.
+
 **Quarantine.** A quarantined release is one named in the title of an issue labelled
 `harness-quarantine` in the harness repository. The issue counts while it's open or closed as
 completed. Every project's loop skips that release, and a project already on it moves to the newest
@@ -184,8 +208,8 @@ The loop stays on the installed version and starts the feature when anything fai
 red baseline, a red CI on the update PR (auto-merge is disabled), and a PR that waits for a human
 merge (`merge: "wait"`, or a diff with more than the pins). The driver doesn't retry a release in the
 same run, and it skips while the update PR is open. Without `gh` it doesn't update. It never updates
-the harness repository itself. `harness report` lists `updated`, `rolled-back` and `quarantined`
-runs, and every run's harness version.
+the harness repository itself. `harness report` lists `updated`, `probation-ok`, `rolled-back`,
+`quarantined` and `probation-cleared` runs, and every run's harness version.
 
 **Reading a run.** The console and `.harness/traces/F-NNN-<timestamp>.log` show the same readable
 log (`src/events.ts` formats the stream):
