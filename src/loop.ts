@@ -1,7 +1,7 @@
 /**
  * Loop driver: runs one fresh `claude -p` session per ready feature in its own git worktree,
- * re-checks the result deterministically, has a fresh-context evaluator grade it, opens a PR
- * and moves on (docs/README.md → Driver-run sessions).
+ * re-checks the result deterministically (post-check, then the `verify.regression` commands), has
+ * a fresh-context evaluator grade it, opens a PR and moves on (docs/README.md → Driver-run sessions).
  *
  *   harness loop                 loop until no feature is ready or a stop condition hits
  *   harness loop --once          exactly one feature
@@ -460,6 +460,79 @@ function postCheck(dir: string, id: string): PostCheck {
   return { ok: problems.length === 0, status, feature, problems, ahead }
 }
 
+export interface RegressionFailure {
+  command: string
+  code: number
+  timedOut: boolean
+  /** The last lines of the command's output, without colour codes. */
+  tail: string
+}
+
+const ANSI = /\x1b\[[0-9;]*[A-Za-z]/g
+
+/**
+ * Runs `verify.regression` in the worktree, in order, stopping at the first command that fails.
+ * A feature's verification steps cover its own tests; these catch a change that breaks another
+ * feature's test before the PR instead of on CI. The full output goes to `logFile`.
+ */
+export async function regressionGate(
+  commands: string[],
+  opts: { cwd: string; shell: string; logFile: string; timeoutMs: number },
+): Promise<RegressionFailure | undefined> {
+  mkdirSync(path.dirname(opts.logFile), { recursive: true })
+  for (const command of commands) {
+    appendFileSync(opts.logFile, `$ ${command}\n`)
+    const { code, timedOut, output } = await new Promise<{
+      code: number
+      timedOut: boolean
+      output: string
+    }>((resolve) => {
+      // One pipe for both streams keeps the output in the order the command wrote it.
+      const child = spawn(opts.shell, ['-c', `exec 2>&1\n${command}`], {
+        cwd: opts.cwd,
+        env: sessionEnv(process.env, { HARNESS_LOOP: '1' }),
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+      currentChild = child
+      let output = ''
+      let timedOut = false
+      const take = (chunk: Buffer) => {
+        appendFileSync(opts.logFile, chunk)
+        output = (output + chunk.toString('utf8')).slice(-64_000)
+      }
+      child.stdout?.on('data', take)
+      child.stderr?.on('data', take)
+      const timer = setTimeout(() => {
+        timedOut = true
+        child.kill('SIGTERM')
+      }, opts.timeoutMs)
+      child.on('error', (error) => take(Buffer.from(`${error.message}\n`)))
+      child.on('close', (code) => {
+        clearTimeout(timer)
+        currentChild = undefined
+        resolve({ code: code ?? 1, timedOut, output })
+      })
+    })
+    appendFileSync(opts.logFile, `exit ${code}${timedOut ? ' (timed out)' : ''}\n\n`)
+    if (code !== 0 || timedOut) {
+      const lines = output
+        .replace(ANSI, '')
+        .split('\n')
+        .map((l) => l.trimEnd())
+      const tail = lines.filter(Boolean).slice(-60).join('\n').slice(-6000)
+      return { command, code, timedOut, tail }
+    }
+  }
+  return undefined
+}
+
+/** The generator prompt line that says which regression commands the driver runs afterwards. */
+export function regressionNote(commands: string[]): string {
+  if (commands.length === 0) return ''
+  const list = commands.map((c) => `\`${c}\``).join(', ')
+  return `\n- After your session the driver runs ${list} in this worktree before the evaluator, whatever the feature's verification steps list. A failure there fails the attempt, so run ${commands.length > 1 ? 'them' : 'it'} yourself before you clock out.\n`
+}
+
 // ---------------------------------------------------------------------------------------
 // Evaluator
 // ---------------------------------------------------------------------------------------
@@ -707,6 +780,7 @@ function sessionArgs(prompt: string, plugin: string): string[] {
 export function generatorTemplate(p: Project = project): string {
   return render(promptFile('generator.md'), {
     PROJECT_NAME: p.config.project.name,
+    REGRESSION: regressionNote(p.config.verify.regression),
     PROJECT_NOTES: projectNotes(p),
     FEATURE_ID: '{{FEATURE_ID}}',
     FEATURE_TITLE: '{{FEATURE_TITLE}}',
@@ -767,6 +841,10 @@ async function runFeature(
       log(
         `would then: post-check (feature status, clean-state --require-terminal, commits ahead of ${defaultBranch()})`,
       )
+      if (config.verify.regression.length > 0)
+        log(
+          `would then: regression gate in ${dir}: ${config.verify.regression.join(' → ')}${opts.services ? '' : ' (skipped: --no-docker)'}`,
+        )
       console.log(
         `  claude -p "<evaluator prompt>" --plugin-dir ${plugin} --append-system-prompt "<plugin agents/evaluator.md body>" --tools ${evaluatorAgent(plugin).tools} --permission-mode ${config.generator.permissionMode} --permission-prompts none --max-turns ${config.evaluator.maxTurns} --max-budget-usd ${config.evaluator.maxBudgetUsd} --model ${config.evaluator.model}${config.evaluator.effort ? ` --effort ${config.evaluator.effort}` : ''} --output-format json --json-schema <prompts/evaluator-schema.json>`,
       )
@@ -855,6 +933,55 @@ async function runFeature(
     log(
       `post-check ok: ${id} is ${check.status}, clean-state check passed, ${check.ahead} commit(s) ahead of ${defaultBranch()}`,
     )
+
+    const regression = config.verify.regression
+    if (regression.length > 0 && !opts.services) {
+      log(`regression gate skipped (--no-docker): ${regression.join(' → ')}`)
+    } else if (regression.length > 0) {
+      const regressionLog = path.join(ROOT, config.traceDir, `${id}-${stamp()}.regression.log`)
+      log(`regression gate: ${regression.join(' → ')}`)
+      const failure = await regressionGate(regression, {
+        cwd: dir,
+        shell: config.verify.shell,
+        logFile: regressionLog,
+        timeoutMs: config.caps.wallClockMin * 60_000,
+      })
+      if (aborting) {
+        record({
+          ts: new Date().toISOString(),
+          feature: id,
+          attempt,
+          outcome: 'aborted',
+          costUsd: cost,
+          turns,
+          minutes: minutes(),
+          trace: traceFile,
+        })
+        return 'aborted'
+      }
+      if (failure) {
+        const how = failure.timedOut
+          ? `timed out after ${config.caps.wallClockMin} min`
+          : `exited ${failure.code}`
+        const summary = `regression gate: ${failure.command} ${how}`
+        log(`✗ ${summary}; output: ${path.relative(ROOT, regressionLog)}`)
+        context = `After your session the driver ran \`${failure.command}\` in this worktree and it ${how}. It is not in ${id}'s verification steps, so the change broke a test elsewhere. The end of its output:\n\n\`\`\`text\n${failure.tail}\n\`\`\`\n\nFind the root cause and fix it inside the feature's scope: a test that encodes behaviour this feature changed on purpose may be updated, but never skip it or weaken its assertions. Re-run \`${failure.command}\` until it passes, re-run /harness:verify-feature ${id}, then clock out again (AGENTS.md → Clock-out).`
+        recordAttempt(dir, id, summary)
+        record({
+          ts: new Date().toISOString(),
+          feature: id,
+          attempt,
+          outcome: 'failed',
+          costUsd: cost,
+          turns,
+          minutes: minutes(),
+          trace: traceFile,
+          note: summary,
+        })
+        continue
+      }
+      log(`regression gate passed: ${regression.join(' → ')}`)
+    }
 
     const { verdict, cost: evalCost } = await runEvaluator(id, feature, dir, plugin)
 
