@@ -32,6 +32,7 @@ matches the package. `pnpm harness:doctor` fails when the two pins differ.
 - [docs/why.md](docs/why.md) — the failure modes each part counters and the principles to keep.
 - [docs/how-it-works.md](docs/how-it-works.md) — the parts, one feature end to end, the safeguards, operating the loop, limits.
 - [docs/config.md](docs/config.md) — every `harness.config.json` key.
+- [docs/self-improvement.md](docs/self-improvement.md) — the retro: the loop finds problems in its own runs and builds the fixes.
 - [docs/adopting.md](docs/adopting.md) — add the harness to a project, or move a project off a copied harness; acceptance checks.
 - [docs/developing.md](docs/developing.md) — change the harness, test it against a project, release it.
 - [CHANGELOG.md](CHANGELOG.md)
@@ -49,6 +50,7 @@ evidence lines name `pnpm harness:*`.
 | `harness clean-state [--quick] [--allow-state-dirty] [--require-terminal]` | The clock-out gate.                                                                               |
 | `harness loop [--once] [--feature F-NNN] [--dry-run]`                      | The unattended driver.                                                                            |
 | `harness report`                                                           | Past driver runs.                                                                                 |
+| `harness retro [--dry-run] [--signals] [--since <time>]`                   | Look back at the loop's runs and file harness problems as issues the loop builds.                 |
 | `harness doctor`                                                           | Is the project wired correctly (config, plugin pin = package version, required files, leftovers). |
 | `harness config`                                                           | Print the resolved configuration with defaults.                                                   |
 

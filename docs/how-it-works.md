@@ -180,6 +180,11 @@ there, push, and merge or re-enable auto-merge.
 denied twice. After each of the first 3–5 runs, compare the evaluator's scores with your own and
 record the rubric change in the project's tuning log.
 
+**Improving the harness itself.** `harness retro` (by hand, or from the loop with `retro.every` /
+`retro.onQueueEmpty`) reads these same traces, files the problems that belong to the harness or
+to the project's harness setup as `harness-retro` issues, and `retro.intake` has the owning
+repository's loop build them. See [self-improvement.md](self-improvement.md).
+
 **Cost expectations.** A small library feature (unit tests only) runs in 20–60 turns and a few
 dollars; a cross-component feature with L2/L3 can use a large part of the caps. Metsävahti F-046,
 the first run on Windows, took two attempts, 140 minutes and about 14 USD in total.

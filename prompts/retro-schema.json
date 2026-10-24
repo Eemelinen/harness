@@ -1,0 +1,36 @@
+{
+  "type": "object",
+  "properties": {
+    "summary": { "type": "string" },
+    "findings": {
+      "type": "array",
+      "maxItems": 5,
+      "items": {
+        "type": "object",
+        "properties": {
+          "fingerprint": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{2,60}$" },
+          "target": { "type": "string", "enum": ["harness", "project"] },
+          "title": { "type": "string" },
+          "problem": { "type": "string" },
+          "evidence": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+          "fix": { "type": "string" },
+          "verification": { "type": "array", "items": { "type": "string" } },
+          "safety": { "type": "boolean" },
+          "confidence": { "type": "string", "enum": ["high", "medium", "low"] }
+        },
+        "required": [
+          "fingerprint",
+          "target",
+          "title",
+          "problem",
+          "evidence",
+          "fix",
+          "verification",
+          "safety",
+          "confidence"
+        ]
+      }
+    }
+  },
+  "required": ["summary", "findings"]
+}

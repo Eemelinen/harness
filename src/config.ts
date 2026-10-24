@@ -193,6 +193,51 @@ export const configSchema = z.object({
   /** Where the driver creates one worktree per feature (default `../<repo>-worktrees`). */
   worktreeRoot: z.string().min(1).optional(),
   merge: z.enum(['wait', 'auto', 'none']).default('wait'),
+  /**
+   * Repo-relative globs (`*` matches across `/`) of files that change what sessions may do or what
+   * gets verified. A loop PR that touches one goes through `review` before it may auto-merge
+   * (docs/self-improvement.md → Safety). Add project hooks that live elsewhere.
+   */
+  reviewPaths: z
+    .array(z.string().min(1))
+    .default(['.claude/*', '.github/workflows/*', 'harness.config.json']),
+  /** How a PR that needs review merges: `evaluate` (a safety review decides) or `human`. */
+  review: z
+    .object({
+      mode: z.enum(['evaluate', 'human']).default('evaluate'),
+      /** The safety-review session; the model defaults to `evaluator.model`. */
+      model: z.string().min(1).optional(),
+      effort: effort.optional(),
+      maxTurns: z.number().int().positive().default(30),
+      maxBudgetUsd: z.number().positive().default(2),
+      wallClockMin: z.number().positive().default(15),
+    })
+    .prefault({}),
+  /** The loop's look back at its own runs (`harness retro`, docs/self-improvement.md). */
+  retro: z
+    .object({
+      /** Run a retro after this many features in one loop run; 0 never does. */
+      every: z.number().int().nonnegative().default(0),
+      /** Run a retro when the queue is empty and features ran since the last one. */
+      onQueueEmpty: z.boolean().default(false),
+      /** Turn open retro issues of this repository into features before the feature list's own. */
+      intake: z.boolean().default(false),
+      /** Retros per loop run, so retro fixes cannot keep the loop busy with retros. */
+      maxPerLoop: z.number().int().positive().default(3),
+      /** GitHub `owner/name` that gets harness findings (default: the package's repository). */
+      harnessRepo: z
+        .string()
+        .regex(/^[\w.-]+\/[\w.-]+$/)
+        .optional(),
+      label: z.string().min(1).default('harness-retro'),
+      /** Analysis session; the model defaults to `evaluator.model`. */
+      model: z.string().min(1).optional(),
+      effort: effort.optional(),
+      maxTurns: z.number().int().positive().default(40),
+      maxBudgetUsd: z.number().positive().default(3),
+      wallClockMin: z.number().positive().default(20),
+    })
+    .prefault({}),
   traceDir: z.string().min(1).default('.harness/traces'),
   runsLog: z.string().min(1).default('.harness/runs.jsonl'),
 })

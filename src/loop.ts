@@ -42,7 +42,7 @@ import {
   type CiCheck,
 } from './ci'
 import { cleanState } from './clean-state'
-import { loadProject, worktreeRoot, type HarnessConfig, type Project } from './config'
+import { CONFIG_FILE, loadProject, worktreeRoot, type HarnessConfig, type Project } from './config'
 import { doctor } from './doctor'
 import { describeEvent, heartbeat, newStreamState } from './events'
 import {
@@ -52,8 +52,19 @@ import {
   nextReadyFeature,
   readFeatureList,
   today,
+  writeFeatureList,
   type Feature,
 } from './feature-list'
+import {
+  countFeatureRun,
+  markQueued,
+  nextIntake,
+  readRetroState,
+  reviewReasons,
+  runRetro,
+  type IntakeItem,
+} from './retro'
+import { hardStops, parseSafetyVerdict, type SafetyVerdict, type Snapshot } from './review'
 import { PACKAGE_ROOT, sh as run, shellLine } from './run'
 
 export const PLUGIN_NAME = 'harness'
@@ -241,13 +252,19 @@ function describeResult(r: ClaudeResult): string {
   )} · cost $${Number(res.total_cost_usd ?? 0).toFixed(2)} · denials ${denials}`
 }
 
-/** The plugin of the harness version installed in `dir` (a worktree may pin a newer one). */
-export function pluginDir(dir: string): string {
+/**
+ * The plugin of the harness version installed in `dir` (a worktree may pin a newer one). In the
+ * harness repository the package resolves to the worktree itself; its sessions must not run the
+ * hooks they are editing, so they get the plugin of the checkout the driver runs from.
+ */
+export function pluginDir(dir: string, driverRoot: string = PACKAGE_ROOT): string {
   try {
     const require = createRequire(path.join(dir, 'package.json'))
-    return path.join(path.dirname(require.resolve('@eemelinen/harness/package.json')), 'plugin')
+    const root = path.dirname(require.resolve('@eemelinen/harness/package.json'))
+    if (path.resolve(root) === path.resolve(dir)) return path.join(driverRoot, 'plugin')
+    return path.join(root, 'plugin')
   } catch {
-    return path.join(PACKAGE_ROOT, 'plugin')
+    return path.join(driverRoot, 'plugin')
   }
 }
 
@@ -507,7 +524,8 @@ interface RunRecord {
   ts: string
   feature: string
   attempt: number
-  outcome: 'pr' | 'merged' | 'blocked' | 'failed' | 'aborted' | 'pushed' | 'ci-fix' | 'ci-rerun'
+  outcome:
+    'pr' | 'merged' | 'blocked' | 'failed' | 'aborted' | 'pushed' | 'ci-fix' | 'ci-rerun' | 'retro'
   verdict?: string
   pr?: string
   costUsd: number
@@ -600,7 +618,11 @@ function generatorTemplate(): string {
 
 type IterationOutcome = 'done' | 'blocked' | 'failed' | 'aborted'
 
-async function runFeature(feature: Feature, opts: Options): Promise<IterationOutcome> {
+async function runFeature(
+  feature: Feature,
+  opts: Options,
+  intake?: IntakeItem,
+): Promise<IterationOutcome> {
   const id = feature.id
   const started = Date.now()
   if (!opts.dryRun) {
@@ -609,6 +631,7 @@ async function runFeature(feature: Feature, opts: Options): Promise<IterationOut
     log(`${id} — ${feature.title}; readable log: ${path.relative(ROOT, logFile)}`)
   }
   const dir = ensureWorktree(id, opts.dryRun)
+  if (intake) addIntakeFeature(dir, intake, opts.dryRun)
   const plugin = pluginDir(opts.dryRun ? ROOT : dir)
   const template = generatorTemplate()
   const maxAttempts = feature.max_attempts ?? config.caps.maxAttempts
@@ -642,6 +665,9 @@ async function runFeature(feature: Feature, opts: Options): Promise<IterationOut
       )
       console.log(
         `  claude -p "<evaluator prompt>" --plugin-dir ${plugin} --append-system-prompt "<plugin agents/evaluator.md body>" --tools ${evaluatorAgent(plugin).tools} --permission-mode ${config.generator.permissionMode} --permission-prompts none --max-turns ${config.evaluator.maxTurns} --max-budget-usd ${config.evaluator.maxBudgetUsd} --model ${config.evaluator.model}${config.evaluator.effort ? ` --effort ${config.evaluator.effort}` : ''} --output-format json --json-schema <prompts/evaluator-schema.json>`,
+      )
+      log(
+        `would then: merge gate — a branch that changes reviewPaths ${config.review.mode === 'human' ? 'waits for a human' : 'gets a safety review session (hard stops wait for a human)'}`,
       )
       log(
         `would then: git push -u ${remote()} ${branchFor(id)} && gh pr create --base ${defaultBranch()} --head ${branchFor(id)} …; merge policy ${opts.autoMerge ? 'auto' : config.merge}`,
@@ -776,8 +802,10 @@ async function runFeature(feature: Feature, opts: Options): Promise<IterationOut
       return 'blocked'
     }
 
-    // Accept → publish.
-    const pr = publish(
+    // Accept → the merge gate, then publish.
+    const gate = await reviewGate(id, feature, dir, intake?.safety)
+    const review = gate.hold
+    const { url: pr } = publish(
       id,
       dir,
       feature,
@@ -789,6 +817,8 @@ async function runFeature(feature: Feature, opts: Options): Promise<IterationOut
         trace: traceFile,
       },
       opts,
+      intake,
+      gate,
     )
     record({
       ts: new Date().toISOString(),
@@ -797,11 +827,17 @@ async function runFeature(feature: Feature, opts: Options): Promise<IterationOut
       outcome: pr ? 'pr' : 'pushed',
       verdict: 'Accept',
       pr,
-      costUsd: cost + evalCost,
+      costUsd: cost + evalCost + gate.cost,
       turns,
       minutes: minutes(),
       trace: traceFile,
+      note: review.length > 0 ? `waits for a human: ${review.join('; ')}` : undefined,
     })
+    if (pr && review.length > 0) {
+      // Not merged, so dependents stay unready; independent features go on.
+      notify(`${id} PR needs a human review before it merges (${review.join('; ')}): ${pr}`)
+      return 'done'
+    }
     if (pr && (config.merge !== 'none' || opts.autoMerge) && opts.wait) {
       const end = await shepherdPr({
         pr,
@@ -812,6 +848,7 @@ async function runFeature(feature: Feature, opts: Options): Promise<IterationOut
         auto: opts.autoMerge || config.merge === 'auto',
         attempt,
         started,
+        safety: intake?.safety,
       })
       if (end !== 'merged') return end
       removeWorktree(id)
@@ -840,6 +877,28 @@ async function runFeature(feature: Feature, opts: Options): Promise<IterationOut
   pushBranch(id, dir)
   notify(`${id} exhausted ${maxAttempts} attempts — blocked, branch pushed`)
   return 'blocked'
+}
+
+/**
+ * A retro issue's feature is written on its own branch, not on the default branch (protected, and
+ * the driver never pushes it); the PR that implements it also adds it.
+ */
+function addIntakeFeature(dir: string, intake: IntakeItem, dryRun: boolean) {
+  const id = intake.feature.id
+  if (dryRun) {
+    log(`would add ${id} to ${config.project.featureList} on ${branchFor(id)} from ${intake.url}`)
+    return
+  }
+  const worktree = loadProject(dir)
+  const file = worktree.resolve(worktree.config.project.featureList)
+  const list = readFeatureList(file, worktree.config.features)
+  if (list.features.some((f) => f.id === id)) return // reused worktree
+  writeFeatureList(
+    { ...list, last_updated: today(), features: [...list.features, intake.feature] },
+    { file, features: worktree.config.features, cwd: dir },
+  )
+  commitState(dir, `chore(harness): add ${id} from retro issue #${intake.issue}`)
+  log(`${id} added to ${config.project.featureList} from ${intake.url}`)
 }
 
 function recordAttempt(dir: string, id: string, reason: string) {
@@ -875,13 +934,21 @@ function publish(
   verdict: Verdict,
   stats: { cost: number; turns: number; trace: string },
   opts: Options,
-): string | undefined {
+  intake: IntakeItem | undefined,
+  gate: Gate,
+): { url?: string } {
   pushBranch(id, dir)
+  const review = gate.hold
   if (!ghAvailable()) {
     log(`gh is not available; branch ${branchFor(id)} pushed — open the PR by hand`)
-    return undefined
+    return {}
   }
   const body = [
+    ...(intake ? [`Closes #${intake.issue} (harness retro).`, ''] : []),
+    ...(review.length > 0
+      ? ['> **Waits for a human review** — not auto-merged:', ...review.map((r) => `> - ${r}`), '']
+      : []),
+    ...(gate.notes.length > 0 ? [...gate.notes, ''] : []),
     `## ${id} — ${feature.title}`,
     '',
     feature.user_visible_behavior,
@@ -915,18 +982,159 @@ function publish(
   )
   if (r.code !== 0) {
     log(`gh pr create failed: ${r.err}`)
-    return undefined
+    return {}
   }
   const url = r.out.split('\n').find((l) => l.startsWith('https://')) ?? r.out
   log(`PR opened: ${url}`)
-  if (opts.autoMerge || config.merge === 'auto') {
+  if (review.length > 0) {
+    log(`not arming auto-merge, the PR waits for a human: ${review.join('; ')}`)
+  } else if (opts.autoMerge || config.merge === 'auto') {
     const m = sh('gh', ['pr', 'merge', url, '--auto', '--squash', '--delete-branch'], {
       cwd: dir,
       quiet: true,
     })
     if (m.code !== 0) log(`gh pr merge --auto failed: ${m.err}`)
   }
-  return url
+  return { url }
+}
+
+// ---------------------------------------------------------------------------------------
+// Merge gate (src/review.ts)
+// ---------------------------------------------------------------------------------------
+
+interface Gate {
+  /** Why the PR waits for a human; empty when it may auto-merge. */
+  hold: string[]
+  /** PR body lines for a passed safety review. */
+  notes: string[]
+  cost: number
+}
+
+function changedFiles(dir: string): string[] {
+  return sh('git', ['diff', '--name-only', `${defaultBranch()}...HEAD`], { cwd: dir, quiet: true })
+    .out.split('\n')
+    .filter(Boolean)
+}
+
+/** The JSON files a hard stop compares, at `ref`; `null` when a file does not parse. */
+function snapshot(dir: string, ref: string): Snapshot {
+  const read = (file: string): unknown => {
+    const r = sh('git', ['show', `${ref}:${file}`], { cwd: dir, quiet: true })
+    if (r.code !== 0) return undefined
+    try {
+      return JSON.parse(r.out) as unknown
+    } catch {
+      return null
+    }
+  }
+  return {
+    config: read(CONFIG_FILE),
+    settings: read('.claude/settings.json'),
+    settingsLocal: read('.claude/settings.local.json'),
+  }
+}
+
+/**
+ * May this branch auto-merge? Changes outside `reviewPaths` (from a non-safety issue) may. Others
+ * wait with `review.mode: human`; with `evaluate` a hard stop holds them, else the safety review
+ * decides. The driver's own config applies, not the branch's, so a PR cannot loosen its own gate.
+ */
+async function reviewGate(
+  id: string,
+  feature: Feature,
+  dir: string,
+  safety?: boolean,
+): Promise<Gate> {
+  const files = changedFiles(dir)
+  const reasons = reviewReasons(files, config.reviewPaths, safety)
+  if (reasons.length === 0) return { hold: [], notes: [], cost: 0 }
+  if (config.review.mode === 'human') return { hold: reasons, notes: [], cost: 0 }
+  const stops = hardStops(snapshot(dir, defaultBranch()), snapshot(dir, 'HEAD'))
+  if (stops.length > 0) {
+    log(`merge gate: never auto-merged: ${stops.join('; ')}`)
+    return {
+      hold: [...reasons, ...stops.map((s) => `never auto-merged: ${s}`)],
+      notes: [],
+      cost: 0,
+    }
+  }
+  const { verdict, cost } = await runSafetyReview(id, feature, dir, reasons, files)
+  if (verdict?.verdict === 'safe')
+    return {
+      hold: [],
+      notes: [
+        `### Safety review: safe`,
+        '',
+        `Reviewed because: ${reasons.join('; ')}.`,
+        ...verdict.reasons.map((r) => `- ${r}`),
+      ],
+      cost,
+    }
+  const why = verdict
+    ? verdict.reasons.map((r) => `safety review: ${r}`)
+    : ['safety review gave no verdict']
+  return { hold: [...reasons, ...why], notes: [], cost }
+}
+
+const MAX_REVIEW_DIFF = 60_000
+
+async function runSafetyReview(
+  id: string,
+  feature: Feature,
+  dir: string,
+  reasons: string[],
+  files: string[],
+): Promise<{ verdict?: SafetyVerdict; cost: number }> {
+  const base = defaultBranch()
+  const model = config.review.model ?? config.evaluator.model
+  const effort = config.review.effort ?? config.evaluator.effort
+  log(`=== ${id}: safety review (${model}): ${reasons.join('; ')}`)
+  // The files that triggered the review; a safety-flagged issue that touched none gets the full diff.
+  const reviewed = files.filter((f) => reviewReasons([f], config.reviewPaths).length > 0)
+  let diff = sh('git', ['diff', `${base}...HEAD`, '--', ...reviewed], { cwd: dir, quiet: true }).out
+  if (diff.length > MAX_REVIEW_DIFF)
+    diff = `${diff.slice(0, MAX_REVIEW_DIFF)}\n… (truncated; read the files for the rest)`
+  const prompt = render(promptFile('safety-review.md'), {
+    PROJECT_NAME: config.project.name,
+    FEATURE_ID: id,
+    FEATURE_TITLE: feature.title,
+    REASONS: reasons.map((r) => `- ${r}`).join('\n'),
+    BASE: base,
+    STAT: sh('git', ['diff', '--stat', `${base}...HEAD`], { cwd: dir, quiet: true }).out,
+    DIFF: diff,
+  })
+  const res = await runClaude({
+    cwd: dir,
+    args: [
+      '-p',
+      prompt,
+      '--tools',
+      'Read,Glob,Grep',
+      '--permission-mode',
+      config.generator.permissionMode,
+      '--permission-prompts',
+      'none',
+      '--max-turns',
+      String(config.review.maxTurns),
+      '--max-budget-usd',
+      String(config.review.maxBudgetUsd),
+      '--model',
+      model,
+      ...(effort ? ['--effort', effort] : []),
+      '--output-format',
+      'json',
+      '--json-schema',
+      promptFile('safety-review-schema.json'),
+    ],
+    env: { HARNESS_LOOP: '1' },
+    traceFile: path.join(ROOT, config.traceDir, `${id}-${stamp()}.safety.json`),
+    wallClockMs: config.review.wallClockMin * 60_000,
+    stream: false,
+  })
+  const verdict = parseSafetyVerdict(res.result)
+  log(`safety review finished: ${describeResult(res)} → ${verdict?.verdict ?? 'no verdict'}`)
+  for (const r of verdict?.reasons ?? []) log(`  ${r.replace(/\s+/g, ' ').slice(0, 200)}`)
+  return { verdict, cost: Number(res.result?.total_cost_usd ?? 0) }
 }
 
 type WaitResult =
@@ -992,6 +1200,8 @@ interface PrRun {
   /** The generator attempt that produced the PR (for the run log). */
   attempt: number
   started: number
+  /** Built from a retro issue marked as a safety change. */
+  safety?: boolean
 }
 
 /** Log excerpts of the failed jobs, one block per workflow run. */
@@ -1179,6 +1389,15 @@ async function shepherdPr(run: PrRun): Promise<'merged' | 'blocked' | 'aborted'>
     const ev = await runEvaluator(id, feature, dir, plugin, ciContext)
     const total = cost + ev.cost
     if (ev.verdict?.verdict === 'Accept') {
+      // Auto-merge is armed: a fix that now needs review must not reach the PR unreviewed.
+      const gate = await reviewGate(id, feature, dir, run.safety)
+      if (gate.hold.length > 0)
+        return giveUp(run, `the CI fix needs a human review: ${gate.hold.join('; ')}`, evidence, {
+          costUsd: total + gate.cost,
+          turns,
+          trace: traceFile,
+          verdict: 'Accept',
+        })
       if (!pushBranch(id, dir)) return giveUp(run, 'git push of the CI fix failed', evidence)
       pushedHead = must('git', ['rev-parse', 'HEAD'], 'git rev-parse', dir)
       record({
@@ -1394,12 +1613,51 @@ export async function loopCommand(argv: string[]): Promise<number> {
 
   preflight(opts)
   let consecutiveFailures = 0
+  let retros = 0
   const attempted = new Set<string>()
+  const intakeIssues = new Set<number>()
+
+  /** A retro when one is due; failures are logged, never fatal to the loop. */
+  const retroIfDue = (trigger: 'every' | 'queue-empty'): boolean => {
+    if (opts.dryRun || retros >= config.retro.maxPerLoop) return false
+    const since = readRetroState(project).featuresSince
+    const due =
+      trigger === 'every'
+        ? config.retro.every > 0 && since >= config.retro.every
+        : config.retro.onQueueEmpty && since > 0
+    if (!due) return false
+    retros += 1
+    log(`=== retro (${trigger}, ${since} feature run(s) since the last one)`)
+    try {
+      runRetro(project, { log })
+    } catch (error) {
+      log(`retro failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    return true
+  }
+
   for (;;) {
     const list = readFeatureList(project.resolve(config.project.featureList), config.features)
     const inFlight = inFlightIds()
     let feature: Feature | undefined
-    if (opts.feature) {
+    let intake: IntakeItem | undefined
+    if (!opts.feature && config.retro.intake) {
+      try {
+        const ids = [...list.features.map((f) => f.id), ...inFlight]
+        const priority = Math.max(0, ...list.features.map((f) => f.priority))
+        intake = nextIntake(project, ids, priority)
+        // Dry run: nothing is queued, so the same issue would come back every iteration.
+        if (intake && intakeIssues.has(intake.issue)) intake = undefined
+      } catch (error) {
+        log(`retro intake skipped: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    if (intake) {
+      feature = intake.feature
+      intakeIssues.add(intake.issue)
+      log(`retro intake: ${intake.url} → ${feature.id} — ${feature.title}`)
+      if (!opts.dryRun) markQueued(project, intake, branchFor(feature.id))
+    } else if (opts.feature) {
       feature = list.features.find((f) => f.id === opts.feature)
       if (!feature) throw new Error(`unknown feature ${opts.feature}`)
       if (!isReady(feature, list)) {
@@ -1416,6 +1674,8 @@ export async function loopCommand(argv: string[]): Promise<number> {
       feature = nextReadyFeature(list, { exclude: [...inFlight, ...attempted] })
     }
     if (!feature) {
+      // A retro may file issues the intake picks up; look again before stopping.
+      if (retroIfDue('queue-empty') && config.retro.intake) continue
       const waiting = inFlight.length
         ? ` (${inFlight.join(', ')} in flight — merge their PRs to unblock dependents)`
         : ''
@@ -1423,8 +1683,10 @@ export async function loopCommand(argv: string[]): Promise<number> {
       break
     }
     attempted.add(feature.id)
-    const outcome = await runFeature(feature, opts)
+    const outcome = await runFeature(feature, opts, intake)
     if (outcome === 'aborted') break
+    if (!opts.dryRun) countFeatureRun(project)
+    retroIfDue('every')
     consecutiveFailures = outcome === 'done' ? 0 : consecutiveFailures + 1
     if (consecutiveFailures >= config.caps.maxConsecutiveFailures) {
       notify(`${consecutiveFailures} consecutive failures — stopping the loop`)

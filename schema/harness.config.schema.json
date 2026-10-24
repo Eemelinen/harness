@@ -636,6 +636,127 @@
         "none"
       ]
     },
+    "reviewPaths": {
+      "default": [
+        ".claude/*",
+        ".github/workflows/*",
+        "harness.config.json"
+      ],
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "review": {
+      "default": {},
+      "type": "object",
+      "properties": {
+        "mode": {
+          "default": "evaluate",
+          "type": "string",
+          "enum": [
+            "evaluate",
+            "human"
+          ]
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "effort": {
+          "type": "string",
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ]
+        },
+        "maxTurns": {
+          "default": 30,
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "maxBudgetUsd": {
+          "default": 2,
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "wallClockMin": {
+          "default": 15,
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      }
+    },
+    "retro": {
+      "default": {},
+      "type": "object",
+      "properties": {
+        "every": {
+          "default": 0,
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "onQueueEmpty": {
+          "default": false,
+          "type": "boolean"
+        },
+        "intake": {
+          "default": false,
+          "type": "boolean"
+        },
+        "maxPerLoop": {
+          "default": 3,
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "harnessRepo": {
+          "type": "string",
+          "pattern": "^[\\w.-]+\\/[\\w.-]+$"
+        },
+        "label": {
+          "default": "harness-retro",
+          "type": "string",
+          "minLength": 1
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "effort": {
+          "type": "string",
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ]
+        },
+        "maxTurns": {
+          "default": 40,
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "maxBudgetUsd": {
+          "default": 3,
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "wallClockMin": {
+          "default": 20,
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      }
+    },
     "traceDir": {
       "default": ".harness/traces",
       "type": "string",

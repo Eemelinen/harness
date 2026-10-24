@@ -1,0 +1,120 @@
+{
+  "$schema": "./schema/harness.config.schema.json",
+  "$comment": "The harness repository is a harness project too: its loop builds the fixes the retro files (docs/self-improvement.md). This file is not part of the published package.",
+  "project": {
+    "name": "Harness",
+    "sourceDirs": ["src", "plugin", "prompts", "bin", "templates"]
+  },
+  "services": null,
+  "milestones": [
+    {
+      "pattern": "pnpm check(?:\\s|$)",
+      "label": "L1 pnpm check"
+    },
+    {
+      "pattern": "pnpm test(?:\\s|$)",
+      "label": "L1 pnpm test"
+    }
+  ],
+  "guard": {
+    "bash": [
+      {
+        "pattern": "(npx |pnpm (exec|dlx) |\\./node_modules/\\.bin/)?vitest(\\s|$)",
+        "atCommandStart": true,
+        "reason": "run tests through pnpm test (or pnpm check); it uses the repository's Vitest config"
+      },
+      {
+        "pattern": "(pnpm |node bin/harness\\.mjs )(harness:)?(loop|retro)(\\s|$)",
+        "atCommandStart": true,
+        "reason": "a session must not start the loop or a retro; they start Claude sessions and file issues"
+      }
+    ],
+    "paths": [
+      {
+        "match": "schema/harness.config.schema.json",
+        "decision": "deny",
+        "reason": "generated: change src/config.ts and run pnpm schema"
+      },
+      {
+        "match": "CHANGELOG.md",
+        "decision": "deny",
+        "reason": "the changelog is written when a human cuts a release (docs/developing.md)"
+      }
+    ]
+  },
+  "cleanState": {
+    "checks": [
+      {
+        "name": "no .only/.skip added under tests/",
+        "kind": "added",
+        "paths": ["tests"],
+        "pattern": "\\.(only|skip)\\(|\\b(it|test|describe)\\.(only|skip)\\b",
+        "message": "a .only/.skip was added under tests/ (AGENTS.md: never skip tests to get green)"
+      },
+      {
+        "name": "no dependency added to the plugin hooks",
+        "kind": "added",
+        "paths": ["plugin/hooks"],
+        "pattern": "^\\+?\\s*import .* from '(?!node:|\\./)",
+        "message": "plugin hooks run from Claude Code's plugin cache without node_modules; use node: built-ins and ./ files only"
+      }
+    ]
+  },
+  "sessionStart": {
+    "hint": "Clock-in: AGENTS.md → Clock-in (or /harness:clock-in). Layer: pnpm check (L1: typecheck, format, harness check, tests)."
+  },
+  "prompts": {
+    "generatorNotes": "docs/harness/generator-notes.md"
+  },
+  "generator": {
+    "model": "claude-opus-5-5",
+    "effort": "high"
+  },
+  "evaluator": {
+    "model": "claude-opus-5-5",
+    "effort": "high"
+  },
+  "allowedTools": [
+    "Bash(pnpm check*)",
+    "Bash(pnpm typecheck)",
+    "Bash(pnpm test*)",
+    "Bash(pnpm format*)",
+    "Bash(pnpm schema)",
+    "Bash(pnpm harness:check*)",
+    "Bash(pnpm harness:feature *)",
+    "Bash(pnpm harness:verify *)",
+    "Bash(pnpm harness:clean-state*)",
+    "Bash(pnpm harness:doctor)",
+    "Bash(pnpm exec prettier*)",
+    "Bash(pnpm exec tsc*)",
+    "Bash(FAST=1 ./init.sh)",
+    "Bash(git status*)",
+    "Bash(git log*)",
+    "Bash(git diff*)",
+    "Bash(git show*)",
+    "Bash(git add *)",
+    "Bash(git commit *)",
+    "Bash(git worktree list)"
+  ],
+  "merge": "auto",
+  "reviewPaths": [
+    ".claude/*",
+    "harness.config.json",
+    "package.json",
+    ".github/workflows/*",
+    "plugin/hooks/*",
+    "plugin/agents/*",
+    "prompts/*",
+    "src/config.ts",
+    "src/loop.ts",
+    "src/retro.ts",
+    "src/review.ts"
+  ],
+  "review": {
+    "mode": "human"
+  },
+  "retro": {
+    "onQueueEmpty": true,
+    "intake": true
+  }
+}
