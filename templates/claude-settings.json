@@ -13,9 +13,7 @@
     "deny": [
       "Read(./.env)",
       "Edit(./.env)",
-      "Write(./.env)",
       "Edit(pnpm-lock.yaml)",
-      "Write(pnpm-lock.yaml)",
       "Bash(git push --force*)",
       "Bash(git push -f*)",
       "Bash(git reset --hard*)"

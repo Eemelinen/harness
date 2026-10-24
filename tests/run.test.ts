@@ -1,6 +1,9 @@
+import { spawnSync } from 'node:child_process'
+import { existsSync } from 'node:fs'
+
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { resolveCommand } from '../src/run'
+import { resolveCommand, sessionEnv } from '../src/run'
 
 describe('resolveCommand', () => {
   afterEach(() => vi.unstubAllEnvs())
@@ -39,4 +42,44 @@ describe('resolveCommand', () => {
       })
     },
   )
+})
+
+describe('sessionEnv', () => {
+  const base = {
+    PATH: '/usr/bin',
+    GH_TOKEN: 'ghp_x',
+    GITHUB_TOKEN: 'ghs_y',
+    GH_ENTERPRISE_TOKEN: 'z',
+    CLAUDE_CODE_OAUTH_TOKEN: 'keep',
+  }
+
+  it('takes every GitHub token away from a session and keeps the rest', () => {
+    const env = sessionEnv(base, { HARNESS_LOOP: '1' })
+    expect(env.GH_TOKEN).toBeUndefined()
+    expect(env.GITHUB_TOKEN).toBeUndefined()
+    expect(env.GH_ENTERPRISE_TOKEN).toBeUndefined()
+    expect(env).toMatchObject({
+      PATH: '/usr/bin',
+      CLAUDE_CODE_OAUTH_TOKEN: 'keep',
+      HARNESS_LOOP: '1',
+      GH_PROMPT_DISABLED: '1',
+      GIT_TERMINAL_PROMPT: '0',
+    })
+    expect(existsSync(env.GH_CONFIG_DIR!)).toBe(true)
+    expect(base.GH_TOKEN).toBe('ghp_x')
+  })
+
+  it('does not let a token in through the extras either', () => {
+    expect(sessionEnv(base, { GH_TOKEN: 'sneaky' }).GH_TOKEN).toBeUndefined()
+  })
+
+  const hasGh = spawnSync('gh', ['--version']).status === 0
+  it.runIf(hasGh)('leaves gh without a login inside a session', () => {
+    const res = spawnSync('gh', ['auth', 'token'], {
+      env: sessionEnv(process.env),
+      encoding: 'utf8',
+    })
+    expect(res.status).not.toBe(0)
+    expect(res.stdout.trim()).toBe('')
+  })
 })

@@ -171,6 +171,19 @@
       "evidence": ["2026-10-24 pnpm check → pass (working tree on 89e7994)"],
       "attempts": 0,
       "notes": "Requested 2026-10-24 for harness-updater: a Docker service that validates each harness issue against the consumer repositories before the harness loop builds it."
+    },
+    {
+      "id": "F-012",
+      "priority": 12,
+      "area": "loop",
+      "title": "Driver-started sessions get no GitHub token",
+      "user_visible_behavior": "Every Claude session the loop or the retro starts (generator, evaluator, safety review, CI fixer, retro analysis) runs without GH_TOKEN, GITHUB_TOKEN or the enterprise variants and with an empty gh config directory, so gh is logged out inside the session while the driver keeps its own GitHub access.",
+      "status": "passing",
+      "depends_on": ["F-011"],
+      "verification": ["L1: pnpm check"],
+      "evidence": ["2026-10-24 pnpm check → pass (working tree on 67cb7be)"],
+      "attempts": 0,
+      "notes": "Requested 2026-10-24: harness-updater runs the loop with the owner token in its environment; a session that read injected text (issue, PR, trace) could have used gh as the owner. Sessions never need GitHub: the driver pushes, opens PRs and reads CI."
     }
   ]
 }

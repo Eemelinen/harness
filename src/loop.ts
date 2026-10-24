@@ -77,7 +77,7 @@ import {
   type IntakeItem,
 } from './retro'
 import { hardStops, parseSafetyVerdict, type SafetyVerdict, type Snapshot } from './review'
-import { PACKAGE_ROOT, sh as run, shellLine } from './run'
+import { PACKAGE_ROOT, sh as run, sessionEnv, shellLine } from './run'
 import { excerptLog, quarantine } from './quarantine'
 import {
   claim,
@@ -220,7 +220,7 @@ function runClaude(runSpec: ClaudeRun): Promise<ClaudeResult> {
   return new Promise((resolve) => {
     const child = spawn('claude', runSpec.args, {
       cwd: runSpec.cwd,
-      env: { ...process.env, ...runSpec.env },
+      env: sessionEnv(process.env, runSpec.env),
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     currentChild = child
