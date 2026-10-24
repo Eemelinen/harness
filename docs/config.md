@@ -95,23 +95,23 @@ outside the worktree. Core rules skip heredoc bodies the same way as `pattern`.
 **`bash`**: rules for Bash commands, checked in order before the core rules; the first hit blocks
 the call (exit 2, Claude sees the reason).
 
-| Key              | Meaning                                                                                                                                                                                                         |
-| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pattern`        | Regular expression tested line by line (like `grep -E`). Heredoc bodies are skipped unless the heredoc feeds a shell (`bash <<EOF`): a script for `python3 - <<EOF` or a commit message is data, not a command. |
-| `atCommandStart` | `true`: match only where a command starts (the start, or after `;`, `&`, a pipe or `(`), not inside a heredoc or message.                                                                                       |
-| `unless`         | The rule does not fire when this also matches.                                                                                                                                                                  |
-| `loopOnly`       | Only in driver-run sessions (`HARNESS_LOOP=1`).                                                                                                                                                                 |
-| `reason`         | Shown to Claude.                                                                                                                                                                                                |
+| Key                 | Meaning                                                                                        |
+| ------------------- | ---------------------------------------------------------------------------------------------- |
+| `match`             | Repo-relative path glob with shell-`case` semantics: `*` matches any characters including `/`. |
+| `decision`          | `deny`, `ask`, or `skip` (stop here without a decision — an exception before a broader rule).  |
+| `reason`            | Shown with the decision.                                                                       |
+| `tools`             | Only for these tools, e.g. `["Write"]`.                                                        |
+| `contentPattern`    | Only when the edited text (old and new strings, or the written content) matches.               |
+| `exceptNewOnBranch` | `true`: not for a file this branch added (see below). Default `false`.                         |
 
-**`paths`**: rules for Edit, Write and MultiEdit, checked in order; the first match decides.
-
-| Key              | Meaning                                                                                        |
-| ---------------- | ---------------------------------------------------------------------------------------------- |
-| `match`          | Repo-relative path glob with shell-`case` semantics: `*` matches any characters including `/`. |
-| `decision`       | `deny`, `ask`, or `skip` (stop here without a decision — an exception before a broader rule).  |
-| `reason`         | Shown with the decision.                                                                       |
-| `tools`          | Only for these tools, e.g. `["Write"]`.                                                        |
-| `contentPattern` | Only when the edited text (old and new strings, or the written content) matches.               |
+With `exceptNewOnBranch`, the rule does not fire for a file missing at the merge base of
+`HEAD` and the default branch (`<remote>/<defaultBranch>` first, then `<defaultBranch>`, from
+`project`), whether the branch committed it or it is untracked; evaluation moves on to the next
+rule. A driver-run session, where `ask` acts as `deny` because nobody answers, can then hand-fix
+a migration it generated in the same feature. Files that exist on the default branch are still
+guarded. The key also allows writing a brand-new matching file by hand, and it does not cover
+renames: a renamed file counts as new under its new name. When git can't tell (no merge base,
+git missing, not a repository) the rule fires as usual.
 
 **`rmAllow`** (default `["/tmp/", "node_modules", "coverage"]`): `rm -rf` is allowed when the
 command mentions one of these.
@@ -126,7 +126,8 @@ command mentions one of these.
   ],
   "paths": [
     { "match": "src/migrations/index.ts", "decision": "skip" },
-    { "match": "src/migrations/*", "decision": "ask", "reason": "migrations are generated" },
+    { "match": "src/migrations/*", "decision": "ask", "reason": "migrations are generated",
+      "exceptNewOnBranch": true },
     { "match": ".env", "decision": "deny", "reason": "secrets" }
   ],
   "rmAllow": ["/tmp/", ".next", "coverage", "node_modules"]

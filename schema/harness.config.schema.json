@@ -300,6 +300,10 @@
               "contentPattern": {
                 "type": "string",
                 "minLength": 1
+              },
+              "exceptNewOnBranch": {
+                "default": false,
+                "type": "boolean"
               }
             },
             "required": [

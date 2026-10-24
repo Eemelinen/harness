@@ -1,4 +1,5 @@
-// Guard rules (see guard.mjs). Pure apart from the commit gate callback, so tests import this.
+// Guard rules (see guard.mjs). Pure apart from the commit gate and merge-base callbacks, so tests
+// import this.
 import os from 'node:os'
 import path from 'node:path'
 
@@ -85,9 +86,15 @@ function insideAny(file, dirs) {
 
 /**
  * The decision for one tool call: `{ block: reason }`, `{ decision, reason }` or null.
- * Pure apart from the commit gate, which runs `harness check` through `checkFeatureList`.
+ * Pure apart from the commit gate, which runs `harness check` through `checkFeatureList`, and
+ * `existsOnBase(rel)` for `exceptNewOnBranch` path rules: true or false when git knows whether the
+ * file exists at the merge base with the default branch, null when it can't tell (the rule fires).
+ * @param {any} input
+ * @param {{ root: string, config: any, loop: boolean,
+ *   checkFeatureList: () => { code: number, out: string },
+ *   existsOnBase?: (rel: string) => boolean | null }} options
  */
-export function evaluate(input, { root, config, loop, checkFeatureList }) {
+export function evaluate(input, { root, config, loop, checkFeatureList, existsOnBase }) {
   const guard = config.guard ?? {}
   const tool = input.tool_name
   const ti = input.tool_input ?? {}
@@ -174,6 +181,8 @@ export function evaluate(input, { root, config, loop, checkFeatureList }) {
       if (!globToRegExp(rule.match).test(rel)) continue
       if (rule.tools && !rule.tools.includes(tool)) continue
       if (rule.contentPattern && !has(content, rule.contentPattern)) continue
+      // A file this branch added (e.g. a migration it generated) may be fixed by hand.
+      if (rule.exceptNewOnBranch && existsOnBase?.(rel) === false) continue
       if (rule.decision === 'skip') return null
       return { decision: rule.decision, reason: rule.reason || `${rel} is protected` }
     }

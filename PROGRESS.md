@@ -13,8 +13,8 @@ this file to change on every branch; keep that heading text exactly.
 - The repository runs its own loop: features come from `harness-retro` issues filed by project
   retros (docs/self-improvement.md). Merges that change a shipped path are released by
   `.github/workflows/release.yml` (docs/developing.md → Releasing); it needs the `RELEASE_TOKEN` secret.
-- Last verified: F-014 on this branch, `pnpm check` green on 2026-10-24.
-- Highest-priority unfinished feature: none (F-000…F-014 passing).
+- Last verified: F-015 on this branch, `pnpm check` green on 2026-10-24.
+- Highest-priority unfinished feature: none (F-000…F-015 passing).
 - Current blocker: none.
 
 ## Next Steps
@@ -30,8 +30,27 @@ this file to change on every branch; keep that heading text exactly.
    taken by the other. A canary loop stopped mid-test lets its claim lapse after 4 h. A quarantine
    issue opened by hand makes the projects roll back.
 3. Build open `harness-retro` issues as they arrive (`pnpm harness:loop`, intake picks them up).
+4. After F-015 is released, Metsävahti can add `"exceptNewOnBranch": true` to its
+   `src/payload/migrations/*` rule (and Personal Finances to its migrations rule), so a driver-run
+   session can fix the `down` order of a migration it generated (harness#20).
 
 ## Session Log
+
+### Session 004 — 2026-10-24 (F-015, driver-run)
+
+- F-015 (retro issue #20): a `guard.paths` rule with `"exceptNewOnBranch": true` does not fire
+  for a file missing at the merge base of HEAD and the default branch (`<remote>/<defaultBranch>`
+  first, then `<defaultBranch>`); evaluation moves on to the next rule. Implemented as proposed,
+  with one placement choice: `evaluate` in `guard-rules.mjs` stays pure and takes an
+  `existsOnBase(rel)` callback, and the git calls (`git merge-base`, `git cat-file -e
+  <base>:./<rel>`) live in `existsOnBaseIn` in `plugin/hooks/lib.mjs`, which `guard.mjs` passes
+  in. The callback returns null when git can't answer, and the rule then fires as before. The
+  `./` form resolves the path from the project root even when it is below the repository top.
+  Renames count as new files under their new name (documented in docs/config.md). Tests: the rule
+  order with a stub callback, and the hook process against a temporary repository (committed and
+  untracked new files pass, a file on the default branch asks, `origin/<branch>` wins over the
+  local branch, no repository or no merge base asks). Verification: `pnpm harness:verify F-015`.
+- This changes the guard and the config, so the PR waits for a human (reviewPaths).
 
 ### Session 003 — 2026-10-24 (automatic releases, project updates, rollout safety)
 
