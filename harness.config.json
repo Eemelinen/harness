@@ -118,6 +118,7 @@
   },
   "retro": {
     "onQueueEmpty": true,
-    "intake": true
+    "intake": true,
+    "intakeLabel": "updater:accepted"
   }
 }
