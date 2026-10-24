@@ -13,8 +13,8 @@ this file to change on every branch; keep that heading text exactly.
 - The repository runs its own loop: features come from `harness-retro` issues filed by project
   retros (docs/self-improvement.md). Merges that change a shipped path are released by
   `.github/workflows/release.yml` (docs/developing.md → Releasing); it needs the `RELEASE_TOKEN` secret.
-- Last verified: F-010 on this branch, `pnpm check` green on 2026-10-24.
-- Highest-priority unfinished feature: none (F-000…F-010 passing).
+- Last verified: F-011 on this branch, `pnpm check` green on 2026-10-24.
+- Highest-priority unfinished feature: none (F-000…F-011 passing).
 - Current blocker: none.
 
 ## Next Steps
@@ -80,6 +80,10 @@ this file to change on every branch; keep that heading text exactly.
 - F-010: quarantine issues carry an excerpt of the failing run's readable log (telling lines plus
   the end, at most 1400 characters, so it survives the intake's 3000-character notes) and the
   absolute paths of that log and its traces. Verification: `pnpm harness:verify F-010`.
+- F-011: `retro.intakeLabel` gates the intake on a label (default unset). The package exports the
+  issue, quarantine and rollout readers for harness-updater, the Docker service that triages
+  harness issues. The harness config is switched to `intakeLabel: "updater:accepted"` only once
+  the updater runs in triage mode. Verification: `pnpm harness:verify F-011`.
 - Bootstrapping: rollback and re-test run in the version a project rolls back to, so they are
   complete only from the release after the one that ships F-008. Until then the staged rollout and
   the selftest (F-007) are the guard.

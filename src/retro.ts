@@ -667,8 +667,10 @@ export function nextIntake(
   const repo = projectRepo(project)
   if (!repo) return undefined
   const queued = queuedLabel(config)
+  const gate = config.retro.intakeLabel
   const open = listIssues(repo, config.retro.label, 'open', root)
     .filter((i) => !i.labels.some((l) => l.name === queued))
+    .filter((i) => !gate || i.labels.some((l) => l.name === gate))
     .sort((a, b) => a.number - b.number)
   for (const issue of open) {
     const spec = parseIssueFeature(issue.body)

@@ -80,4 +80,22 @@ describe('retro intake', () => {
       'From retro issue o/harness#5: https://github.com/o/harness/issues/5\n\nThe guard matched a heredoc.',
     )
   })
+
+  it('takes only issues with the intake label when one is set', () => {
+    const gated = (labels: string[]) => {
+      issues[2]!.labels = labels.map((name) => ({ name }))
+      const project: Project = {
+        root: '/p',
+        config: parseConfig({
+          generator: { model: 'm' },
+          evaluator: { model: 'm' },
+          retro: { intakeLabel: 'updater:accepted' },
+        }),
+        resolve: (...s) => path.resolve('/p', ...s),
+      }
+      return nextIntake(project, ['F-000'], 0)
+    }
+    expect(gated(['harness-retro'])).toBeUndefined()
+    expect(gated(['harness-retro', 'updater:accepted'])?.issue).toBe(5)
+  })
 })

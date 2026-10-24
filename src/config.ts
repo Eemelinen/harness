@@ -238,6 +238,11 @@ export const configSchema = z.object({
       onQueueEmpty: z.boolean().default(false),
       /** Turn open retro issues of this repository into features before the feature list's own. */
       intake: z.boolean().default(false),
+      /**
+       * Take only retro issues that also carry this label, e.g. `updater:accepted` from a triage
+       * service (harness-updater). Unset: every open retro issue with a feature block.
+       */
+      intakeLabel: z.string().min(1).optional(),
       /** Retros per loop run, so retro fixes cannot keep the loop busy with retros. */
       maxPerLoop: z.number().int().positive().default(3),
       /** GitHub `owner/name` that gets harness findings (default: the package's repository). */

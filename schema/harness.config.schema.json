@@ -733,6 +733,10 @@
           "default": false,
           "type": "boolean"
         },
+        "intakeLabel": {
+          "type": "string",
+          "minLength": 1
+        },
         "maxPerLoop": {
           "default": 3,
           "type": "integer",
