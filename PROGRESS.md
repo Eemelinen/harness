@@ -13,8 +13,8 @@ this file to change on every branch; keep that heading text exactly.
 - The repository runs its own loop: features come from `harness-retro` issues filed by project
   retros (docs/self-improvement.md). Merges that change a shipped path are released by
   `.github/workflows/release.yml` (docs/developing.md → Releasing); it needs the `RELEASE_TOKEN` secret.
-- Last verified: F-012 on this branch, `pnpm check` green on 2026-10-24.
-- Highest-priority unfinished feature: none (F-000…F-012 passing).
+- Last verified: F-013 on this branch, `pnpm check` green on 2026-10-24.
+- Highest-priority unfinished feature: none (F-000…F-013 passing).
 - Current blocker: none.
 
 ## Next Steps
@@ -90,6 +90,15 @@ this file to change on every branch; keep that heading text exactly.
   the owner's token. Also: the settings template no longer carries `Write(...)` deny rules, which
   Claude Code ignores (`Edit(...)` covers every file-editing tool). Verification:
   `pnpm harness:verify F-012`.
+- F-013 (found live in metsavahti): after `pnpm install` repointed `node_modules/@eemelinen/harness`,
+  `require.resolve` in the running driver still returned the old package (Node caches real paths).
+  So the "restarted" driver was the old code. It failed the doctor on the new pins (exit 1), and the
+  supervisor rolled back and quarantined v0.3.2 (#11, a false alarm); v0.3.3 failed the same way.
+  `installedRoot` now resolves from the file system with `realpathSync.native`. `restart` refuses a
+  version mismatch, and a restarted driver that isn't the probation version records
+  `restart-mismatch`, which the supervisor treats as settled. The bug is in the parent, so every
+  project on v0.3.1–v0.3.4 needs one hand update to the release with this fix. Verification:
+  `pnpm harness:verify F-013`; a test reproduces the cached `require.resolve`.
 - Bootstrapping: rollback and re-test run in the version a project rolls back to, so they are
   complete only from the release after the one that ships F-008. Until then the staged rollout and
   the selftest (F-007) are the guard.

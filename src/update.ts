@@ -13,7 +13,7 @@
  * (src/quarantine.ts).
  * Without `gh` the command falls back to the newest tag (`git ls-remote`) and cannot see quarantines.
  */
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import path from 'node:path'
 import { parseArgs } from 'node:util'
@@ -257,10 +257,29 @@ export function isHarnessRepo(dir: string): boolean {
   }
 }
 
-/** The CLI entry of the harness installed in `dir` (after an update, the new version's). */
-export function installedBin(dir: string): string {
+/**
+ * The root of the harness installed in `dir`, read from the file system on every call. Node caches
+ * module real paths for the life of the process, so after `pnpm install` repointed
+ * `node_modules/@eemelinen/harness` at a new version, `require.resolve` in the running driver
+ * still returned the old one. v0.3.1–v0.3.4 restarted onto their own old code that way, failed
+ * the doctor on the new pins, and quarantined a good release.
+ */
+export function installedRoot(dir: string): string {
+  const link = path.join(dir, 'node_modules', ...PACKAGE.split('/'))
+  if (existsSync(link)) return realpathSync.native(link)
+  // The harness repository itself: the package resolves to its own checkout.
   const require = createRequire(path.join(dir, 'package.json'))
-  return path.join(path.dirname(require.resolve(`${PACKAGE}/package.json`)), 'bin', 'harness.mjs')
+  return path.dirname(require.resolve(`${PACKAGE}/package.json`))
+}
+
+/** The CLI entry of the harness installed in `dir` (after an update, the new version's). */
+export const installedBin = (dir: string) => path.join(installedRoot(dir), 'bin', 'harness.mjs')
+
+export function installedVersion(dir: string): string {
+  const pkg = JSON.parse(readFileSync(path.join(installedRoot(dir), 'package.json'), 'utf8')) as {
+    version: string
+  }
+  return pkg.version
 }
 
 const marketplaceSource = (settings: unknown) =>

@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -8,6 +9,8 @@ import { describe, expect, it } from 'vitest'
 import {
   compareVersions,
   isBreaking,
+  installedBin,
+  installedVersion,
   isHarnessRepo,
   latestRelease,
   newestTag,
@@ -309,5 +312,45 @@ describe('pickTarget', () => {
     expect(
       pickTarget({ ...base, releases: [release('0.3.1')], quarantined: new Set(['0.3.1']) }),
     ).toMatchObject({ action: 'notify', version: '0.3.1' })
+  })
+})
+
+describe('installedRoot', () => {
+  it('follows node_modules after pnpm install repointed it, despite the module cache', () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'harness-installed-'))
+    writeFileSync(path.join(root, 'package.json'), '{"name":"project"}')
+    const store = (version: string) => {
+      const dir = path.join(
+        root,
+        'node_modules',
+        '.pnpm',
+        `harness@${version}`,
+        'node_modules',
+        '@eemelinen',
+        'harness',
+      )
+      mkdirSync(path.join(dir, 'bin'), { recursive: true })
+      writeFileSync(
+        path.join(dir, 'package.json'),
+        JSON.stringify({ name: '@eemelinen/harness', version }),
+      )
+      return dir
+    }
+    const link = path.join(root, 'node_modules', '@eemelinen', 'harness')
+    mkdirSync(path.dirname(link), { recursive: true })
+    symlinkSync(store('0.3.1'), link, 'junction')
+    // The running driver resolved the package once; Node caches that real path.
+    const require = createRequire(path.join(root, 'package.json'))
+    expect(require.resolve('@eemelinen/harness/package.json')).toContain('harness@0.3.1')
+    expect(installedVersion(root)).toBe('0.3.1')
+
+    // pnpm install moves the link to the new version.
+    rmSync(link)
+    symlinkSync(store('0.3.2'), link, 'junction')
+    expect(require.resolve('@eemelinen/harness/package.json')).toContain('harness@0.3.1')
+    expect(installedVersion(root)).toBe('0.3.2')
+    expect(installedBin(root)).toContain(
+      path.join('harness@0.3.2', 'node_modules', '@eemelinen', 'harness', 'bin', 'harness.mjs'),
+    )
   })
 })

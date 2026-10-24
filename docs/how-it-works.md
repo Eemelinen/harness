@@ -173,6 +173,9 @@ release first, so a bad release is caught there and kept away from the others:
    even with `--no-wait`.
 4. **Restart.** Once it merges, the driver pulls, runs `pnpm install` and restarts itself on the new
    version. The features it already tried, the retro count and the failure count carry over.
+   Before restarting, it checks that the new version is really the one installed, and a restarted
+   driver checks that it is the version on probation. A mismatch stops the loop with an error and
+   is never blamed on the release.
 
 **Probation.** The first feature after an update runs on probation, and what happens next depends on
 how it ends:
