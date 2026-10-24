@@ -1,8 +1,9 @@
+import { spawn } from 'node:child_process'
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
   asideBranch,
@@ -13,8 +14,13 @@ import {
   probationResult,
   readCarry,
   retryFeature,
+  signalExitCode,
+  STOP_SIGNALS,
+  stopHandler,
+  stopNotice,
   supervise,
   withHarnessVersion,
+  type Signalable,
 } from '../src/loop'
 
 function dir(name: string, pkg: object) {
@@ -211,5 +217,144 @@ describe('retryFeature', () => {
   it('has nothing to re-test without a retry or once the feature is gone', () => {
     expect(retryFeature(undefined, { features: [feature('F-012')] })).toBeUndefined()
     expect(retryFeature(retry, { features: [feature('F-011')] })).toBeUndefined()
+  })
+})
+
+describe('stopHandler', () => {
+  function stubChild() {
+    const sent: NodeJS.Signals[] = []
+    const child: Signalable & { sent: NodeJS.Signals[] } = {
+      sent,
+      exitCode: null,
+      signalCode: null,
+      kill: (signal) => {
+        sent.push(signal)
+        return true
+      },
+    }
+    return child
+  }
+
+  function setup(opts: { session?: Signalable; driver?: Signalable } = {}) {
+    let clock = 0
+    const lines: string[] = []
+    const stops: NodeJS.Signals[] = []
+    const exits: number[] = []
+    const handle = stopHandler({
+      log: (line) => lines.push(line),
+      session: () => opts.session,
+      driver: () => opts.driver,
+      onStop: (signal) => stops.push(signal),
+      exit: (code) => exits.push(code),
+      now: () => clock,
+      graceMs: 1000,
+      repeatMs: 2000,
+    })
+    return { handle, lines, stops, exits, advance: (ms: number) => (clock += ms) }
+  }
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  for (const signal of STOP_SIGNALS)
+    it(`stops gracefully on ${signal}: logs it, sends the session SIGINT, then SIGTERM after the grace`, () => {
+      vi.useFakeTimers()
+      const session = stubChild()
+      const { handle, lines, stops, exits } = setup({ session })
+      handle(signal)
+      expect(stops).toEqual([signal])
+      expect(lines[0]).toMatch(new RegExp(`^${signal}: stopping`))
+      expect(session.sent).toEqual(['SIGINT'])
+      expect(exits).toEqual([])
+      vi.advanceTimersByTime(999)
+      expect(session.sent).toEqual(['SIGINT'])
+      vi.advanceTimersByTime(1)
+      expect(session.sent).toEqual(['SIGINT', 'SIGTERM'])
+    })
+
+  it('sends no SIGTERM to a session that ended within the grace', () => {
+    vi.useFakeTimers()
+    const session = stubChild()
+    const { handle } = setup({ session })
+    handle('SIGTERM')
+    session.exitCode = 130
+    vi.advanceTimersByTime(1000)
+    expect(session.sent).toEqual(['SIGINT'])
+  })
+
+  it('without a session only marks the stop', () => {
+    const { handle, lines, stops, exits } = setup()
+    handle('SIGHUP')
+    expect(stops).toEqual(['SIGHUP'])
+    expect(lines).toEqual([
+      'SIGHUP: stopping after the current step; a second signal exits at once',
+    ])
+    expect(exits).toEqual([])
+  })
+
+  it('passes the signal itself on to a restarted driver', () => {
+    const driver = stubChild()
+    const { handle } = setup({ driver })
+    handle('SIGTERM')
+    expect(driver.sent).toEqual(['SIGTERM'])
+  })
+
+  it('exits at once on a second signal, ending the session', () => {
+    vi.useFakeTimers()
+    const session = stubChild()
+    const driver = stubChild()
+    const { handle, lines, stops, exits, advance } = setup({ session, driver })
+    handle('SIGHUP')
+    advance(5000)
+    handle('SIGTERM')
+    expect(stops).toEqual(['SIGHUP'])
+    expect(lines.at(-1)).toBe('SIGTERM again: exiting now')
+    expect(session.sent).toEqual(['SIGINT', 'SIGTERM'])
+    expect(driver.sent).toEqual(['SIGHUP', 'SIGTERM'])
+    expect(exits).toEqual([143])
+  })
+
+  it('treats a repeat within the window as the same stop (terminal plus pnpm forwarding)', () => {
+    const session = stubChild()
+    const { handle, exits, advance } = setup({ session })
+    handle('SIGINT')
+    advance(10)
+    handle('SIGINT')
+    expect(exits).toEqual([])
+    expect(session.sent).toEqual(['SIGINT'])
+  })
+
+  it('escalates to SIGTERM on a real process that ignores SIGINT', async () => {
+    const proc = spawn(
+      process.execPath,
+      ['-e', "process.on('SIGINT', () => {}); console.log('ready'); setInterval(() => {}, 1000)"],
+      { stdio: ['ignore', 'pipe', 'ignore'] },
+    )
+    await new Promise((resolve) => proc.stdout.once('data', resolve))
+    const exited = new Promise<NodeJS.Signals | null>((resolve) =>
+      proc.on('exit', (_code, signal) => resolve(signal)),
+    )
+    const { handle } = setup({ session: proc })
+    handle('SIGTERM')
+    expect(await exited).toBe('SIGTERM')
+  })
+})
+
+describe('signalExitCode', () => {
+  it('is 128 plus the signal number', () => {
+    expect(signalExitCode('SIGHUP')).toBe(129)
+    expect(signalExitCode('SIGINT')).toBe(130)
+    expect(signalExitCode('SIGTERM')).toBe(143)
+  })
+})
+
+describe('stopNotice', () => {
+  it('names the signal, and the interrupted feature with where it stays', () => {
+    expect(stopNotice('SIGTERM')).toBe('loop stopped by SIGTERM')
+    const notice = stopNotice('SIGHUP', 'F-032', 'feat/')
+    expect(notice).toContain('loop stopped by SIGHUP during F-032 (recorded as aborted)')
+    expect(notice).toContain('feat/F-032')
+    expect(notice).toContain('pnpm harness:loop --feature F-032')
   })
 })

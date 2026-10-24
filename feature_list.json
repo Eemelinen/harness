@@ -230,7 +230,7 @@
       "area": "harness",
       "title": "Handle SIGTERM and SIGHUP in the loop driver like SIGINT",
       "user_visible_behavior": "A loop driver that receives SIGTERM or SIGHUP logs the signal and stops the current session the way SIGINT does. It records the attempt as aborted in runs.jsonl with the signal, notifies, and exits non-zero; a second signal exits at once. docs/how-it-works.md shows how to run a loop that outlives its terminal.",
-      "status": "not_started",
+      "status": "in_progress",
       "depends_on": [],
       "verification": ["L1: pnpm check"],
       "evidence": [],

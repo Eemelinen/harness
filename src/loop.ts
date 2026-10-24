@@ -17,6 +17,10 @@
  * folder being trusted. A session whose init event does not list the plugin is stopped at once:
  * an unattended session without the guard must not run.
  *
+ * SIGINT, SIGTERM and SIGHUP stop the loop alike (stopHandler): the current session gets SIGINT,
+ * the attempt is recorded as `aborted` with the signal, the driver notifies and exits 128 + the
+ * signal number; a second signal exits at once (docs/how-it-works.md → Operating the loop).
+ *
  * With `update.auto`, before each feature the driver moves to the harness release pickTarget chooses
  * (src/update.ts: verified by a canary, or claimed by this project as canary on its rollout issue,
  * src/rollout.ts; not breaking, not quarantined) through its own pin-only PR, after the
@@ -36,7 +40,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { createRequire } from 'node:module'
-import { tmpdir } from 'node:os'
+import { constants as osConstants, tmpdir } from 'node:os'
 import path from 'node:path'
 import { parseArgs } from 'node:util'
 
@@ -210,8 +214,84 @@ export function mergeResult(
   return { ...next, num_turns: Number(prev.num_turns ?? 0) + Number(next.num_turns ?? 0) }
 }
 
-let currentChild: ReturnType<typeof spawn> | undefined
+/** A process the stop handler can signal: a Claude session or a restarted driver. */
+export interface Signalable {
+  kill(signal: NodeJS.Signals): boolean
+  exitCode: number | null
+  signalCode: NodeJS.Signals | null
+}
+
+/** The Claude session running now. */
+let currentChild: Signalable | undefined
+/** The driver restarted on another harness version, while this one waits for it. */
+let restartedDriver: Signalable | undefined
 let aborting = false
+/** The signal that stopped the loop (SIGINT, SIGTERM or SIGHUP). */
+let stopSignal: NodeJS.Signals | undefined
+
+export const STOP_SIGNALS: NodeJS.Signals[] = ['SIGINT', 'SIGTERM', 'SIGHUP']
+/** How long a session has to end after its SIGINT before it gets SIGTERM. */
+export const STOP_GRACE_MS = 30_000
+/**
+ * A repeat within this window is the same stop: a terminal signals the whole process group and
+ * pnpm passes the signal on again, so one Ctrl-C or one closed terminal can arrive twice.
+ */
+export const REPEAT_WINDOW_MS = 2_000
+
+/** The shell's exit status for a process ended by `signal` (128 + its number). */
+export function signalExitCode(signal: NodeJS.Signals): number {
+  return 128 + (osConstants.signals[signal] ?? 0)
+}
+
+/**
+ * The driver's handler for SIGINT, SIGTERM and SIGHUP, which a closing terminal, IDE task or chat
+ * session sends to the processes it started. The first signal stops the loop gracefully: the
+ * current session gets SIGINT, then SIGTERM after `graceMs`, and the loop records the attempt as
+ * `aborted`, notifies and exits with signalExitCode once the session has ended. A restarted driver
+ * gets the same signal and stops on its own terms. A second signal (after `repeatMs`) ends the
+ * session and exits at once.
+ */
+export function stopHandler(deps: {
+  log: (line: string) => void
+  session: () => Signalable | undefined
+  driver: () => Signalable | undefined
+  onStop: (signal: NodeJS.Signals) => void
+  exit: (code: number) => void
+  now?: () => number
+  graceMs?: number
+  repeatMs?: number
+}): (signal: NodeJS.Signals) => void {
+  const now = deps.now ?? Date.now
+  const graceMs = deps.graceMs ?? STOP_GRACE_MS
+  const repeatMs = deps.repeatMs ?? REPEAT_WINDOW_MS
+  let firstAt: number | undefined
+  return (signal) => {
+    const session = deps.session()
+    const driver = deps.driver()
+    if (firstAt !== undefined) {
+      if (now() - firstAt < repeatMs) return
+      deps.log(`${signal} again: exiting now`)
+      session?.kill('SIGTERM')
+      driver?.kill(signal)
+      deps.exit(signalExitCode(signal))
+      return
+    }
+    firstAt = now()
+    deps.onStop(signal)
+    deps.log(
+      `${signal}: stopping ${session ? `— the current session gets SIGINT (SIGTERM after ${graceMs / 1000} s)` : 'after the current step'}; a second signal exits at once`,
+    )
+    driver?.kill(signal)
+    if (!session) return
+    session.kill('SIGINT')
+    setTimeout(() => {
+      if (session.exitCode === null && session.signalCode === null) session.kill('SIGTERM')
+    }, graceMs).unref()
+  }
+}
+
+/** The `note` of a run the stop signal ended. */
+const stopNote = () => `stopped by ${stopSignal ?? 'SIGINT'}`
 
 function runClaude(runSpec: ClaudeRun): Promise<ClaudeResult> {
   mkdirSync(path.dirname(runSpec.traceFile), { recursive: true })
@@ -795,24 +875,27 @@ async function runFeature(
       throw new Error(
         `the ${PLUGIN_NAME} plugin did not load from ${plugin}; run pnpm install in ${dir} and pnpm harness:doctor`,
       )
-    if (aborting) {
+    const cost = Number(gen.result?.total_cost_usd ?? 0)
+    const turns = Number(gen.result?.num_turns ?? 0)
+    const minutes = () => Math.round((Date.now() - started) / 60000)
+    // A stop signal ends the attempt after any session: no further session, push or PR starts.
+    const aborted = (costUsd: number): IterationOutcome => {
       record({
         ts: new Date().toISOString(),
         feature: id,
         attempt,
         outcome: 'aborted',
-        costUsd: Number(gen.result?.total_cost_usd ?? 0),
-        turns: Number(gen.result?.num_turns ?? 0),
-        minutes: Math.round((Date.now() - started) / 60000),
+        costUsd,
+        turns,
+        minutes: minutes(),
         trace: traceFile,
+        note: stopNote(),
       })
       return 'aborted'
     }
+    if (aborting) return aborted(cost)
 
     const check = postCheck(dir, id)
-    const cost = Number(gen.result?.total_cost_usd ?? 0)
-    const turns = Number(gen.result?.num_turns ?? 0)
-    const minutes = () => Math.round((Date.now() - started) / 60000)
 
     if (check.status === 'blocked') {
       log(`${id} was blocked by the session: ${check.feature?.notes.slice(-300) ?? ''}`)
@@ -857,6 +940,7 @@ async function runFeature(
     )
 
     const { verdict, cost: evalCost } = await runEvaluator(id, feature, dir, plugin)
+    if (aborting) return aborted(cost + evalCost)
 
     if (!verdict || verdict.verdict === 'Revise') {
       const findings = verdict
@@ -908,6 +992,7 @@ async function runFeature(
 
     // Accept → the merge gate, then publish.
     const gate = await reviewGate(id, feature, dir, intake?.safety)
+    if (aborting) return aborted(cost + evalCost + gate.cost)
     const review = gate.hold
     const { url: pr } = publish(
       id,
@@ -1422,7 +1507,13 @@ async function shepherdPr(run: PrRun): Promise<'merged' | 'blocked' | 'aborted'>
     const turns = Number(fix.result?.num_turns ?? 0)
     const fixRecord = { ...base, costUsd: cost, turns, trace: traceFile }
     if (aborting) {
-      record({ ...fixRecord, ts: new Date().toISOString(), outcome: 'aborted', minutes: minutes() })
+      record({
+        ...fixRecord,
+        ts: new Date().toISOString(),
+        outcome: 'aborted',
+        minutes: minutes(),
+        note: stopNote(),
+      })
       return 'aborted'
     }
 
@@ -2139,7 +2230,9 @@ async function restart(
   const child = await spawnTee(process.execPath, [bin, ...process.argv.slice(2)], logPath, {
     cwd: process.cwd(),
     env: { ...process.env, [CARRY_ENV]: JSON.stringify(carry) },
+    onSpawn: (proc) => (restartedDriver = proc),
   })
+  restartedDriver = undefined
   return { ...child, since, log: logPath }
 }
 
@@ -2386,11 +2479,17 @@ export async function loopCommand(argv: string[]): Promise<number> {
     return 0
   }
 
-  process.on('SIGINT', () => {
-    aborting = true
-    log('SIGINT: finishing the current session, then stopping')
-    currentChild?.kill('SIGINT')
+  const onSignal = stopHandler({
+    log,
+    session: () => currentChild,
+    driver: () => restartedDriver,
+    onStop: (signal) => {
+      aborting = true
+      stopSignal = signal
+    },
+    exit: (code) => process.exit(code),
   })
+  for (const signal of STOP_SIGNALS) process.on(signal, onSignal)
 
   const carried = process.env[CARRY_ENV]
   delete process.env[CARRY_ENV]
@@ -2447,13 +2546,14 @@ export async function loopCommand(argv: string[]): Promise<number> {
     consecutiveFailures,
   })
 
+  let stoppedDuring: string | undefined
   for (;;) {
     // No update while a re-test runs: it must run on the version it rolled back to.
     const moved = carry.retry ? undefined : await maybeUpdate(opts, carry)
     if (moved) {
       const probation = carry.probation
       const child = await restart(snapshot(), moved)
-      await new Promise((resolve) => setImmediate(resolve)) // let a pending SIGINT handler run
+      await new Promise((resolve) => setImmediate(resolve)) // let a pending stop-signal handler run
       const verdict = supervise({
         code: child.code,
         aborted: aborting || child.signal !== null,
@@ -2530,12 +2630,22 @@ export async function loopCommand(argv: string[]): Promise<number> {
     try {
       outcome = await runFeature(feature, opts, intake)
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (aborting) {
+        // A step the stop signal cut short (the merge wait, a killed session); stop, don't crash.
+        log(`${feature.id}: ${message} (${stopNote()})`)
+        stoppedDuring = feature.id
+        break
+      }
       if (!probation && !retry) throw error
       outcome = 'error'
-      failure = error instanceof Error ? error.message : String(error)
+      failure = message
       log(`${feature.id}: driver error — ${failure}`)
     }
-    if (outcome === 'aborted') break
+    if (outcome === 'aborted') {
+      stoppedDuring = feature.id
+      break
+    }
 
     if (probation) {
       const result = probationResult(outcome)
@@ -2650,6 +2760,16 @@ export async function loopCommand(argv: string[]): Promise<number> {
     }
     if (opts.once) break
   }
+  if (stopSignal) {
+    notify(stopNotice(stopSignal, stoppedDuring, config.project.branchPrefix))
+    return signalExitCode(stopSignal)
+  }
   log(`loop finished on ${today()}; run pnpm harness:report for the summary`)
   return 0
+}
+
+/** The notification when a stop signal ended the loop; `feature` is the one it interrupted. */
+export function stopNotice(signal: NodeJS.Signals, feature?: string, branchPrefix = 'feat/') {
+  if (!feature) return `loop stopped by ${signal}`
+  return `loop stopped by ${signal} during ${feature} (recorded as aborted); its worktree and branch ${branchPrefix}${feature} stay — pnpm harness:loop --feature ${feature} continues it there`
 }

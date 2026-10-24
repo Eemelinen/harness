@@ -98,3 +98,15 @@ describe('spawnTee', () => {
     expect(text).toContain('harness: pnpm harness:doctor reports errors')
   })
 })
+
+describe('spawnTee onSpawn', () => {
+  it('hands over the process, so a stop signal can be passed on to it', async () => {
+    const log = path.join(mkdtempSync(path.join(tmpdir(), 'harness-tee-')), 'driver.log')
+    const script = "console.log('ready'); setInterval(() => {}, 1000)"
+    const result = await spawnTee(process.execPath, ['-e', script], log, {
+      cwd: tmpdir(),
+      onSpawn: (child) => child.stdout?.once('data', () => child.kill('SIGTERM')),
+    })
+    expect(result).toEqual({ code: 1, signal: 'SIGTERM' })
+  })
+})
