@@ -92,11 +92,22 @@ you, and the loop continues with features that do not depend on it.
 
 A merged harness fix is released automatically. It reaches a project when the project's pins move
 ([developing.md](developing.md) → Releasing): by hand, or before the next feature when the project
-sets `update.auto`. With `update.auto`, a fix the loop got wrong does reach the other projects'
-running loops. Its limits are the harness repository's own merge gate (`reviewPaths` with
-`review.mode: "human"`, so guard, hook, prompt and loop changes wait for a human), the
-update PR's doctor and L1 baseline, and the CI of each project. Leave `update.auto` off where
-that is too much trust.
+sets `update.auto`. With `update.auto`, a fix the loop got wrong can reach other projects' running
+loops. These layers keep it contained:
+
+- **In the harness repository:** its merge gate (`reviewPaths` with `review.mode: "human"` hold the
+  guard, hooks, prompts, loop, update and release code for a human), and CI with
+  `harness selftest`.
+- **When it ships:** breaking changes, including config schema breaks, are released as breaking,
+  and projects don't take those on their own.
+- **Staged rollout:** a waiting time (`update.minAgeHours`) after one canary project takes the
+  release first.
+- **Per project:** the update PR's selftest against the installed version, its doctor and L1
+  baseline, and the project's CI.
+- **Quarantine:** a release found bad is held back from every project, and projects already on it
+  move off it ([how-it-works.md](how-it-works.md#4-operating-the-loop)).
+
+Leave `update.auto` off where that is still too much trust.
 
 ## Turning it on
 

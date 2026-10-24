@@ -703,6 +703,11 @@
         "allowBreaking": {
           "default": false,
           "type": "boolean"
+        },
+        "minAgeHours": {
+          "default": 6,
+          "type": "number",
+          "minimum": 0
         }
       }
     },

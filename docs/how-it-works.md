@@ -139,26 +139,53 @@ rely on `allowedTools` alone.
 | `pnpm harness:update [--check]`           | Move this checkout to the newest harness release (`--to X.Y.Z` for another one; `--check` only reports).                                                                  |
 | `pnpm harness:feature list`               | Queue overview with `[ready]` / `[ready, human-only]` markers.                                                                                                            |
 
-**Staying on the newest harness.** With `update.auto`, before each feature the driver looks up the
-newest `vX.Y.Z` tag of the harness repository (`git ls-remote`). When it is newer than the
-installed package, the driver:
+**Staying on the newest harness (rollout safety).** With `update.auto`, the loop moves to new
+harness releases on its own before it starts a feature, in stages, so a bad release is caught in one
+project and kept away from the others:
 
-1. Creates a `harness/update-vX.Y.Z` worktree, pins the package and the plugin marketplace ref to
-   the release (the same steps as `pnpm harness:update`) and runs the new version's
-   `harness doctor` and `init.sh` with the L1 baseline.
-2. Commits `chore(harness): update to vX.Y.Z`, pushes and opens the PR. A PR that changes only the
-   pin files skips the merge gate. Under the auto merge policy it auto-merges, and the driver waits
-   for it, even with `--no-wait`.
-3. Once it merges, the driver pulls, runs `pnpm install` and restarts itself on the new version. The
-   features it already tried, the retro count and the failure count carry over, and the next
-   feature runs entirely on the new release.
+1. **Which release.** The driver reads the harness repository's GitHub releases and its
+   `harness-quarantine` issues (with `gh`). It takes the newest release that meets all of these:
+   - newer than the installed one
+   - not a draft or prerelease
+   - not breaking, unless `update.allowBreaking` is set
+   - not quarantined
+   - at least `update.minAgeHours` old (default 6)
 
-It stays on the installed version and moves on to the feature when anything fails. That covers a red
-baseline, a red CI on the update PR (auto-merge is disabled) and a PR that waits for a human merge
-(`merge: "wait"`, or a diff with more than the pins). The driver does not retry a release in the same
-run, and it skips while the update PR is open. It only reports a breaking release (a new major
-version; a new minor while 0.x) unless `update.allowBreaking` is set. It never updates the harness
-repository itself. `harness report` lists updates as `updated`.
+   One canary project with `minAgeHours: 0` takes each release first. The others follow once it has
+   been out a while. A newer release that is breaking is reported, not taken.
+
+2. **Selftest before the PR.** In a `harness/update-vX.Y.Z` worktree the driver pins the package and
+   the plugin marketplace ref (the steps of `pnpm harness:update`). Then it runs `harness selftest`
+   with the installed version and with the new one. A check that passes on the installed version and
+   fails on the new one quarantines the release, with the failing checks as evidence, and no PR is
+   opened.
+3. **The PR.** Doctor and `init.sh` with the L1 baseline run on the new pins. Then the driver commits
+   `chore(harness): update to vX.Y.Z`, pushes and opens the PR. A PR that changes only the pin files
+   skips the merge gate. Under the auto merge policy it auto-merges, and the driver waits for it,
+   even with `--no-wait`.
+4. **Restart.** Once it merges, the driver pulls, runs `pnpm install` and restarts itself on the new
+   version. The features it already tried, the retro count and the failure count carry over.
+
+**Quarantine.** A quarantined release is one named in the title of an issue labelled
+`harness-quarantine` in the harness repository. The issue counts while it's open or closed as
+completed. Every project's loop skips that release, and a project already on it moves to the newest
+eligible release (the fix), or else back to the newest older release that isn't quarantined, through
+a `harness/rollback-vX.Y.Z` PR. The age limit doesn't apply to moving off a quarantined release.
+
+- **Filed by the driver:** the issue has the evidence and a feature block, so the harness
+  repository's loop builds the fix (`retro.intake`). A second project that finds the same release
+  bad comments on the same issue.
+- **By hand:**
+  `gh issue create --repo Eemelinen/harness --label harness-quarantine --title "quarantine vX.Y.Z: <why>"`.
+- **Lift it:** close the issue as **not planned**. The fix PR closes it as completed, which keeps the
+  bad release quarantined.
+
+The loop stays on the installed version and starts the feature when anything fails. That covers a
+red baseline, a red CI on the update PR (auto-merge is disabled), and a PR that waits for a human
+merge (`merge: "wait"`, or a diff with more than the pins). The driver doesn't retry a release in the
+same run, and it skips while the update PR is open. Without `gh` it doesn't update. It never updates
+the harness repository itself. `harness report` lists `updated`, `rolled-back` and `quarantined`
+runs, and every run's harness version.
 
 **Reading a run.** The console and `.harness/traces/F-NNN-<timestamp>.log` show the same readable
 log (`src/events.ts` formats the stream):

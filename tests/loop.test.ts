@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   mergeResult,
-  planUpdate,
+  pinBranch,
   pluginDir,
   queueEmptyNotice,
   readCarry,
@@ -89,39 +89,10 @@ describe('queueEmptyNotice', () => {
   })
 })
 
-describe('planUpdate', () => {
-  const base = { installed: '0.3.0', allowBreaking: false, openBranch: false }
-
-  it('updates to a newer non-breaking release', () => {
-    expect(planUpdate({ ...base, latest: '0.3.4' })).toEqual({ action: 'update' })
-    expect(planUpdate({ ...base, installed: '1.2.0', latest: '1.4.1' })).toEqual({
-      action: 'update',
-    })
-  })
-
-  it('does nothing without a newer release', () => {
-    expect(planUpdate({ ...base, latest: undefined })).toEqual({ action: 'none' })
-    expect(planUpdate({ ...base, latest: '0.3.0' })).toEqual({ action: 'none' })
-    expect(planUpdate({ ...base, installed: '0.4.0', latest: '0.3.9' })).toEqual({
-      action: 'none',
-    })
-  })
-
-  it('waits while the update PR is open', () => {
-    expect(planUpdate({ ...base, latest: '0.3.1', openBranch: true })).toEqual({
-      action: 'none',
-      reason: 'the update PR for v0.3.1 is still open',
-    })
-  })
-
-  it('reports a breaking release instead of taking it, unless allowBreaking', () => {
-    const plan = planUpdate({ ...base, latest: '0.4.0' })
-    expect(plan.action).toBe('notify')
-    expect(plan).toMatchObject({ reason: expect.stringContaining('update.allowBreaking') })
-    expect(planUpdate({ ...base, installed: '1.9.0', latest: '2.0.0' }).action).toBe('notify')
-    expect(planUpdate({ ...base, latest: '0.4.0', allowBreaking: true })).toEqual({
-      action: 'update',
-    })
+describe('pinBranch', () => {
+  it('names forward and backward pin moves apart', () => {
+    expect(pinBranch('0.3.2', true)).toBe('harness/update-v0.3.2')
+    expect(pinBranch('0.3.0', false)).toBe('harness/rollback-v0.3.0')
   })
 })
 

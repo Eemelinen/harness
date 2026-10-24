@@ -220,6 +220,8 @@ export const configSchema = z.object({
       auto: z.boolean().default(false),
       /** Also take a breaking release (a new major version; a new minor version while 0.x). */
       allowBreaking: z.boolean().default(false),
+      /** A release must be out this long before the loop takes it; 0 for the canary project. */
+      minAgeHours: z.number().nonnegative().default(6),
     })
     .prefault({}),
   /** The loop's look back at its own runs (`harness retro`, docs/self-improvement.md). */

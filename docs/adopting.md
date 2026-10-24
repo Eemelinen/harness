@@ -182,13 +182,18 @@ Run these in order. All must pass.
    with `SKIP_ENV_VALIDATION=1` and placeholder env, so add a `build:ci` script that runs the same
    build with the same env. Metsävahti F-048 passed L1–L3 locally and failed exactly that build in CI.
 6. **Optional: keep the harness current.** With `"update": { "auto": true }` in
-   `harness.config.json` the loop moves to each new harness release before it starts the next
-   feature: it opens a `harness/update-vX.Y.Z` PR that changes only the package pin and the plugin
+   `harness.config.json`, the loop moves to new harness releases before it starts the next
+   feature. It opens a `harness/update-vX.Y.Z` PR that changes only the package pin and the plugin
    marketplace ref, auto-merges it under `merge: "auto"` (or `--auto-merge`) and restarts itself on
-   the new version ([how-it-works.md](how-it-works.md#4-operating-the-loop)). Such a PR skips this
-   project's merge gate; what reaches the project is what the harness repository released, where
-   changes to the guard, hooks, prompts and loop wait for a human. Breaking releases still need
-   `pnpm harness:update` by hand, or `update.allowBreaking`.
+   the new version ([how-it-works.md](how-it-works.md#4-operating-the-loop)).
+   - **Canary:** pick one project as the canary and give it `"minAgeHours": 0`. It takes each
+     release first. The others wait `update.minAgeHours` (default 6) before they follow, and skip
+     any release the canary or anyone else quarantined.
+   - **Trust:** such a PR skips this project's merge gate. Before the PR opens, the new version's
+     `harness selftest` must not regress against the installed one. Changes to the guard, hooks,
+     prompts and loop wait for a human in the harness repository.
+   - **Breaking releases** still need `pnpm harness:update --to X.Y.Z` by hand, or
+     `update.allowBreaking`.
 
 ## 5. Prompt for an agent doing the adoption
 

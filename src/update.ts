@@ -2,21 +2,24 @@
  * Moving a project to a newer harness release: the package pin and the plugin marketplace ref,
  * which must name the same tag (src/doctor.ts), then the new version's doctor.
  *
- *   harness update               update this checkout to the newest release
+ *   harness update               update this checkout to the newest release that is not quarantined
  *   harness update --to 0.4.0    to this release
- *   harness update --check       print the installed and the newest release, change nothing
+ *   harness update --check       print the installed and the target release, change nothing
  *
  * With `update.auto` the loop driver does the same before each feature, in its own worktree and
- * PR (src/loop.ts → maybeUpdate). Releases are found with `git ls-remote` on the package's
- * repository, so no `gh` login is needed to look.
+ * PR (src/loop.ts → maybeUpdate), and picks the release with pickTarget: old enough
+ * (`update.minAgeHours`), not breaking unless allowed, and not quarantined. A release is
+ * quarantined by a `harness-quarantine` issue in the harness repository (src/quarantine.ts).
+ * Without `gh` the command falls back to the newest tag (`git ls-remote`) and cannot see quarantines.
  */
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import path from 'node:path'
 import { parseArgs } from 'node:util'
 
-import { loadProject } from './config'
+import { loadProject, type HarnessConfig } from './config'
 import { MARKETPLACE, packageVersion, REPO } from './doctor'
+import { harnessRepo, listIssues, type Issue } from './retro'
 import { PACKAGE_ROOT, sh } from './run'
 
 export const PACKAGE = '@eemelinen/harness'
@@ -74,6 +77,129 @@ export function latestRelease(url: string, cwd: string): string | undefined {
 }
 
 export const pinSpec = (version: string) => `github:${REPO}#v${version}`
+
+/** The repository whose releases and quarantine issues the rollout reads. */
+export const rolloutRepo = (config: HarnessConfig) => harnessRepo(config) ?? REPO
+
+export const QUARANTINE_LABEL = 'harness-quarantine'
+
+export interface Release {
+  version: string
+  publishedAt: string
+  draft: boolean
+  prerelease: boolean
+}
+
+export function listReleases(repo: string, cwd: string): Release[] {
+  const r = sh(
+    'gh',
+    [
+      'release',
+      'list',
+      '--repo',
+      repo,
+      '--limit',
+      '50',
+      '--json',
+      'tagName,publishedAt,isDraft,isPrerelease',
+    ],
+    { cwd, quiet: true },
+  )
+  if (r.code !== 0) throw new Error(`gh release list --repo ${repo} failed: ${r.err}`)
+  return (
+    JSON.parse(r.out || '[]') as {
+      tagName: string
+      publishedAt: string
+      isDraft: boolean
+      isPrerelease: boolean
+    }[]
+  )
+    .filter((x) => x.tagName.startsWith('v') && parseVersion(x.tagName))
+    .map((x) => ({
+      version: x.tagName.slice(1),
+      publishedAt: x.publishedAt,
+      draft: x.isDraft,
+      prerelease: x.isPrerelease,
+    }))
+}
+
+/**
+ * The versions named in quarantine issue titles. An issue keeps its versions quarantined while it is
+ * open or closed as completed (the fix merged; the bad release stays bad); closing it as not
+ * planned lifts the quarantine (a false alarm).
+ */
+export function quarantinedVersions(
+  issues: Pick<Issue, 'title' | 'state' | 'stateReason'>[],
+): Set<string> {
+  const versions = new Set<string>()
+  for (const issue of issues) {
+    if (issue.state === 'CLOSED' && issue.stateReason === 'NOT_PLANNED') continue
+    for (const m of issue.title.matchAll(/\bv(\d+\.\d+\.\d+)\b/g)) versions.add(m[1]!)
+  }
+  return versions
+}
+
+export function listQuarantined(repo: string, cwd: string): Set<string> {
+  return quarantinedVersions(listIssues(repo, QUARANTINE_LABEL, 'all', cwd))
+}
+
+export type Target =
+  | { action: 'update'; version: string; why: string }
+  | { action: 'none'; reason?: string }
+  | { action: 'notify'; version: string; reason: string }
+
+const newestOf = (releases: Release[]) =>
+  [...releases].sort((a, b) => compareVersions(b.version, a.version))[0]
+
+/**
+ * The release to move to. Normally the newest published release newer than `installed` that is
+ * not quarantined, not breaking (unless `allowBreaking`) and at least `minAgeHours` old. When
+ * `installed` itself is quarantined, the age does not count: move forward to the newest eligible
+ * release (the fix) or, when there is none, back to the newest older release that is not
+ * quarantined.
+ */
+export function pickTarget(s: {
+  installed: string
+  releases: Release[]
+  quarantined: Set<string>
+  now: number
+  minAgeHours: number
+  allowBreaking: boolean
+}): Target {
+  const clean = s.releases.filter((r) => !r.draft && !r.prerelease && !s.quarantined.has(r.version))
+  const allowed = (r: Release) => s.allowBreaking || !isBreaking(s.installed, r.version)
+  const newer = clean.filter((r) => compareVersions(r.version, s.installed) > 0)
+  if (s.quarantined.has(s.installed)) {
+    const why = `v${s.installed} is quarantined`
+    const forward = newestOf(newer.filter(allowed))
+    if (forward) return { action: 'update', version: forward.version, why }
+    const back = newestOf(clean.filter((r) => compareVersions(r.version, s.installed) < 0))
+    if (back) return { action: 'update', version: back.version, why }
+    return {
+      action: 'notify',
+      version: s.installed,
+      reason: `harness ${why} and no other release is available; fix it by hand`,
+    }
+  }
+  if (newer.length === 0) return { action: 'none' }
+  const compatible = newer.filter(allowed)
+  if (compatible.length === 0) {
+    const breaking = newestOf(newer)!
+    return {
+      action: 'notify',
+      version: breaking.version,
+      reason: `harness v${breaking.version} is a breaking release (installed v${s.installed}); update by hand (pnpm harness:update --to ${breaking.version}) or set update.allowBreaking`,
+    }
+  }
+  const ageHours = (r: Release) => (s.now - Date.parse(r.publishedAt)) / 3_600_000
+  const ready = newestOf(compatible.filter((r) => ageHours(r) >= s.minAgeHours))
+  if (ready) return { action: 'update', version: ready.version, why: 'newer release' }
+  const waiting = newestOf(compatible)!
+  return {
+    action: 'none',
+    reason: `v${waiting.version} is ${ageHours(waiting).toFixed(1)} h old; waiting until it is ${s.minAgeHours} h old (update.minAgeHours)`,
+  }
+}
 
 /** Is `dir` the harness repository itself? It runs from its own checkout and has nothing to pin. */
 export function isHarnessRepo(dir: string): boolean {
@@ -179,10 +305,38 @@ export function updateCommand(argv: string[]): number {
     return 0
   }
   const installed = packageVersion()
-  const target = values.to?.replace(/^v/, '') ?? latestRelease(repositoryUrl(), project.root)
+  let target = values.to?.replace(/^v/, '')
+  if (!target) {
+    const repo = rolloutRepo(project.config)
+    if (sh('gh', ['auth', 'status'], { cwd: project.root, quiet: true }).code === 0) {
+      // By hand there is no waiting time; quarantines and breaking releases still count.
+      const plan = pickTarget({
+        installed,
+        releases: listReleases(repo, project.root),
+        quarantined: listQuarantined(repo, project.root),
+        now: Date.now(),
+        minAgeHours: 0,
+        allowBreaking: project.config.update.allowBreaking,
+      })
+      if (plan.action !== 'update') {
+        console.log(
+          `installed v${installed}: ${plan.action === 'none' ? (plan.reason ?? 'up to date') : plan.reason}`,
+        )
+        return 0
+      }
+      target = plan.version
+      console.log(`installed v${installed} · target v${target} (${plan.why})`)
+    } else {
+      target = latestRelease(repositoryUrl(), project.root)
+      console.log(
+        `installed v${installed} · newest v${target ?? '?'} (gh is not logged in: quarantines are not checked)`,
+      )
+    }
+  } else {
+    console.log(`installed v${installed} · target v${target}`)
+  }
   if (!target || !parseVersion(target)) throw new Error(`no release found (${target ?? 'none'})`)
-  const breaking = isBreaking(installed, target) ? ' (breaking)' : ''
-  console.log(`installed v${installed} · ${values.to ? 'target' : 'newest'} v${target}${breaking}`)
+  if (isBreaking(installed, target)) console.log('note: a breaking release; read its notes')
   if (values.check || compareVersions(target, installed) === 0) return 0
   applyUpdate(project.root, target, (line) => console.log(line))
   console.log(

@@ -17,9 +17,10 @@
  * folder being trusted. A session whose init event does not list the plugin is stopped at once:
  * an unattended session without the guard must not run.
  *
- * With `update.auto`, before each feature the driver checks for a newer harness release. It moves
- * to it through its own `harness/update-vX.Y.Z` PR (pins only, checked with doctor and the L1
- * baseline), then restarts itself on the new version; see maybeUpdate.
+ * With `update.auto`, before each feature the driver moves to the harness release pickTarget chooses
+ * (src/update.ts: old enough, not breaking, not quarantined) through its own pin-only PR, after the
+ * new version's selftest showed no regression; then it restarts itself on that version. See
+ * maybeUpdate and pinPr.
  */
 import { spawn, spawnSync } from 'node:child_process'
 import {
@@ -47,7 +48,7 @@ import {
 } from './ci'
 import { cleanState } from './clean-state'
 import { CONFIG_FILE, loadProject, worktreeRoot, type HarnessConfig, type Project } from './config'
-import { doctor, packageVersion, REPO } from './doctor'
+import { doctor, packageVersion } from './doctor'
 import { describeEvent, heartbeat, newStreamState } from './events'
 import {
   FEATURE_ID,
@@ -70,18 +71,22 @@ import {
 } from './retro'
 import { hardStops, parseSafetyVerdict, type SafetyVerdict, type Snapshot } from './review'
 import { PACKAGE_ROOT, sh as run, shellLine } from './run'
+import { quarantine } from './quarantine'
+import { regressions, type Check } from './selftest'
 import {
   applyUpdate,
   compareVersions,
   installedBin,
-  isBreaking,
   isHarnessRepo,
-  latestRelease,
+  listQuarantined,
+  listReleases,
   notPinOnly,
   PACKAGE,
+  pickTarget,
   pinSpec,
-  repositoryUrl,
+  rolloutRepo,
   type PinSnapshot,
+  type Target,
 } from './update'
 
 export const PLUGIN_NAME = 'harness'
@@ -587,6 +592,8 @@ interface RunRecord {
     | 'ci-rerun'
     | 'retro'
     | 'updated'
+    | 'rolled-back'
+    | 'quarantined'
   verdict?: string
   pr?: string
   costUsd: number
@@ -1613,27 +1620,6 @@ export function readCarry(raw: string | undefined): Carry {
   }
 }
 
-export type UpdatePlan =
-  { action: 'none'; reason?: string } | { action: 'notify'; reason: string } | { action: 'update' }
-
-/** Whether the loop moves to `latest` now; a `reason` is logged, a `notify` one goes to the human. */
-export function planUpdate(s: {
-  installed: string
-  latest: string | undefined
-  allowBreaking: boolean
-  openBranch: boolean
-}): UpdatePlan {
-  if (!s.latest || compareVersions(s.latest, s.installed) <= 0) return { action: 'none' }
-  if (s.openBranch)
-    return { action: 'none', reason: `the update PR for v${s.latest} is still open` }
-  if (!s.allowBreaking && isBreaking(s.installed, s.latest))
-    return {
-      action: 'notify',
-      reason: `harness v${s.latest} is a breaking release (installed v${s.installed}); update by hand (pnpm harness:update) or set update.allowBreaking`,
-    }
-  return { action: 'update' }
-}
-
 function readJson(file: string): unknown {
   return existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : undefined
 }
@@ -1642,6 +1628,10 @@ const pinSnapshot = (dir: string): PinSnapshot => ({
   packageJson: readJson(path.join(dir, 'package.json')),
   settings: readJson(path.join(dir, '.claude', 'settings.json')),
 })
+
+/** `harness/update-vX.Y.Z` moving forward, `harness/rollback-vX.Y.Z` moving back. */
+export const pinBranch = (version: string, forward: boolean) =>
+  `harness/${forward ? 'update' : 'rollback'}-v${version}`
 
 /** Does the remote default branch already pin `version` (an update PR merged by a human)? */
 function defaultBranchPins(version: string): boolean {
@@ -1652,8 +1642,8 @@ function defaultBranchPins(version: string): boolean {
   return (pkg.devDependencies?.[PACKAGE] ?? pkg.dependencies?.[PACKAGE]) === pinSpec(version)
 }
 
-/** The default branch has the update: pull it and install, so a restart runs the new version. */
-function takeUpdate(installed: string, latest: string, pr?: string): true {
+/** The default branch has the new pins: pull it and install, so a restart runs that version. */
+function takeUpdate(installed: string, target: string, pr?: string): true {
   must('git', ['pull', '--ff-only', remote(), defaultBranch()], 'git pull after the harness update')
   const install = sh('pnpm', ['install', '--frozen-lockfile'], { quiet: true })
   if (install.code !== 0)
@@ -1662,95 +1652,107 @@ function takeUpdate(installed: string, latest: string, pr?: string): true {
     ts: new Date().toISOString(),
     feature: 'harness',
     attempt: 1,
-    outcome: 'updated',
+    outcome: compareVersions(target, installed) > 0 ? 'updated' : 'rolled-back',
     pr,
     costUsd: 0,
     turns: 0,
     minutes: 0,
     trace: '',
-    note: `v${installed} → v${latest}`,
+    note: `v${installed} → v${target}`,
   })
   return true
 }
 
 /**
- * Before a feature starts: move to the newest harness release when `update.auto` is on. The
- * update is its own PR from its own worktree, so a feature PR never carries it, and it changes only
- * the pin files; such a PR skips the merge gate (src/update.ts → notPinOnly) and auto-merges under
- * the auto merge policy. The driver waits for it even with --no-wait, because only a merged update
- * can be pulled. Returns true when the default branch now has the update and the driver must
- * restart. Any failure keeps the loop on the installed version; that release is not retried in
- * this run.
+ * The selftest checks that pass with the installed version (run in ROOT) and fail with the new
+ * one (run in the update worktree). A version without `selftest` counts as all-pass.
  */
-async function maybeUpdate(opts: Options, carry: Carry): Promise<boolean> {
-  if (!config.update.auto || isHarnessRepo(ROOT)) return false
-  const installed = packageVersion()
-  let latest: string | undefined
-  try {
-    latest = latestRelease(repositoryUrl(), ROOT)
-  } catch (error) {
-    log(`harness update check skipped: ${error instanceof Error ? error.message : String(error)}`)
-    return false
-  }
-  if (!latest || carry.updates.includes(latest)) return false
-  if (compareVersions(latest, installed) > 0 && !opts.dryRun && defaultBranchPins(latest)) {
-    carry.updates.push(latest)
-    log(`${defaultBranch()} already pins harness v${latest}; pulling it`)
+function selftestRegressions(dir: string): Check[] {
+  const run = (cwd: string): Check[] | undefined => {
+    const r = sh(process.execPath, [installedBin(cwd), 'selftest', '--json'], { cwd, quiet: true })
     try {
-      return takeUpdate(installed, latest)
-    } catch (error) {
-      notify(
-        `harness update to v${latest} failed, the loop stays on v${installed}: ${error instanceof Error ? error.message : String(error)}`,
-      )
-      return false
+      return JSON.parse(r.out) as Check[]
+    } catch {
+      return undefined
     }
   }
-  const branch = `harness/update-v${latest}`
-  const openBranch =
-    sh('git', ['ls-remote', '--heads', remote(), `refs/heads/${branch}`], { quiet: true }).out !==
-    ''
-  const plan = planUpdate({
-    installed,
-    latest,
-    allowBreaking: config.update.allowBreaking,
-    openBranch,
-  })
-  if (plan.action === 'none') {
-    if (plan.reason) log(`harness update: ${plan.reason}`)
-    return false
-  }
-  carry.updates.push(latest)
-  if (plan.action === 'notify') {
-    notify(plan.reason)
-    return false
-  }
-  const auto = opts.autoMerge || config.merge === 'auto'
-  const dir = path.join(worktreeRoot(project), `harness-update-v${latest}`)
-  if (opts.dryRun) {
-    log(`would update harness v${installed} → v${latest} before the next feature:`)
-    log(`  git worktree add -b ${branch} ${dir} ${defaultBranch()}`)
-    log(`  pnpm add ${PACKAGE}@${pinSpec(latest)}, marketplace ref → v${latest}, harness doctor`)
-    log(`  (cd ${dir} && ${config.project.init})  # with the L1 baseline`)
-    log(
-      `  commit, git push, gh pr create; ${auto ? 'auto-merge, wait, pull, pnpm install, restart' : 'then wait for a human merge'}`,
-    )
-    return false
-  }
+  const before = run(ROOT) ?? []
+  const after = run(dir)
+  if (!after)
+    return [
+      { name: 'selftest runs', ok: false, detail: 'the new version printed no selftest JSON' },
+    ]
+  return regressions(before, after)
+}
 
-  log(`=== harness update v${installed} → v${latest}`)
-  const subject = `chore(harness): update to v${latest}`
+type PinResult = { state: 'merged' | 'waiting' | 'failed' | 'quarantined'; pr?: string }
+
+/**
+ * One PR that only moves the harness pins to `target`, from its own worktree, so a feature PR never
+ * carries it. Moving forward, the new version's selftest must not regress against the installed
+ * one, or the release is quarantined instead. Then doctor and `init.sh` with the L1 baseline run on
+ * the new pins. A diff that changes only the pins skips the merge gate (src/update.ts →
+ * notPinOnly) and auto-merges under the auto merge policy; the driver waits for it even with
+ * --no-wait, because only a merged change can be pulled. Failures are notified, never thrown.
+ */
+async function pinPr(
+  target: string,
+  installed: string,
+  opts: Options,
+  why: string,
+): Promise<PinResult> {
+  const forward = compareVersions(target, installed) > 0
+  const branch = pinBranch(target, forward)
+  const dir = path.join(worktreeRoot(project), branch.replace('/', '-'))
+  const auto = opts.autoMerge || config.merge === 'auto'
+  const subject = forward
+    ? `chore(harness): update to v${target}`
+    : `chore(harness): roll back to v${target}`
+  log(`=== harness ${forward ? 'update' : 'rollback'} v${installed} → v${target} (${why})`)
   try {
     sh('git', ['worktree', 'remove', '--force', dir], { quiet: true })
     sh('git', ['branch', '-D', branch], { quiet: true })
     mkdirSync(path.dirname(dir), { recursive: true })
     must('git', ['worktree', 'add', '-b', branch, dir, defaultBranch()], 'git worktree add')
     const before = pinSnapshot(dir)
-    applyUpdate(dir, latest, log)
-    log(`${config.project.init} with the L1 baseline on v${latest}`)
+    applyUpdate(dir, target, log)
+    if (forward) {
+      const regressed = selftestRegressions(dir)
+      if (regressed.length > 0) {
+        for (const c of regressed) log(`  ✗ selftest ${c.name}: ${c.detail}`)
+        const filed = quarantine(project, {
+          version: target,
+          from: installed,
+          cause: `harness selftest regresses: ${regressed.map((c) => c.name).join(', ')}`,
+          evidence: regressed.map(
+            (c) => `\`${c.name}\` passes on v${installed}, fails on v${target}: ${c.detail}`,
+          ),
+        })
+        record({
+          ts: new Date().toISOString(),
+          feature: 'harness',
+          attempt: 1,
+          outcome: 'quarantined',
+          pr: filed.url,
+          costUsd: 0,
+          turns: 0,
+          minutes: 0,
+          trace: '',
+          note: `v${target}: selftest regressions (${filed.action})`,
+          harness: installed,
+        })
+        notify(
+          `harness v${target} quarantined: selftest regresses in ${config.project.name} (${filed.url}); the loop stays on v${installed}`,
+        )
+        return { state: 'quarantined', pr: filed.url }
+      }
+      log(`selftest of v${target}: no regression against v${installed}`)
+    }
+    log(`${config.project.init} with the L1 baseline on v${target}`)
     const init = sh('bash', [config.project.init], { cwd: dir, quiet: true })
     if (init.code !== 0)
       throw new Error(
-        `${config.project.init} failed on v${latest}:\n${`${init.out}\n${init.err}`.trim().slice(-2000)}`,
+        `${config.project.init} failed on v${target}:\n${`${init.out}\n${init.err}`.trim().slice(-2000)}`,
       )
     must('git', ['add', '-A'], 'git add', dir)
     const changed = must('git', ['diff', '--cached', '--name-only'], 'git diff', dir)
@@ -1764,20 +1766,23 @@ async function maybeUpdate(opts: Options, carry: Carry): Promise<boolean> {
         '-m',
         subject,
         '-m',
-        `Opened by the loop driver (update.auto) from v${installed}.`,
+        `Opened by the loop driver (update.auto) on v${installed}: ${why}.`,
       ],
       'git commit',
       dir,
     )
     must('git', ['push', '-u', remote(), branch], 'git push', dir)
     if (!ghAvailable()) {
-      notify(`harness update v${latest} pushed as ${branch}; open and merge its PR by hand`)
-      return false
+      notify(`harness ${branch} pushed; open and merge its PR by hand`)
+      return { state: 'waiting' }
     }
+    const repo = rolloutRepo(config)
     const body = [
-      `Moves the harness from v${installed} to v${latest}.`,
+      `Moves the harness from v${installed} to v${target}: ${why}.`,
       '',
-      `Release notes: https://github.com/${REPO}/releases/tag/v${latest} · changes: https://github.com/${REPO}/compare/v${installed}...v${latest}`,
+      forward
+        ? `Release notes: https://github.com/${repo}/releases/tag/v${target} · changes: https://github.com/${repo}/compare/v${installed}...v${target}`
+        : `Release notes of v${target}: https://github.com/${repo}/releases/tag/v${target}`,
       '',
       ...(hold.length > 0
         ? [
@@ -1785,10 +1790,10 @@ async function maybeUpdate(opts: Options, carry: Carry): Promise<boolean> {
             ...hold.map((r) => `> - ${r}`),
           ]
         : [
-            `Changes only the harness pin; checked on v${latest} with \`harness doctor\` and \`${config.project.init}\` (L1 baseline). Opened by the loop driver (\`update.auto\`).`,
+            `Changes only the harness pin; checked on v${target} with ${forward ? '`harness selftest` against v' + installed + ', ' : ''}\`harness doctor\` and \`${config.project.init}\` (L1 baseline). Opened by the loop driver (\`update.auto\`).`,
           ]),
     ].join('\n')
-    const bodyFile = path.join(ROOT, config.traceDir, `harness-update-v${latest}-pr-body.md`)
+    const bodyFile = path.join(ROOT, config.traceDir, `${branch.replace('/', '-')}-pr-body.md`)
     mkdirSync(path.dirname(bodyFile), { recursive: true })
     writeFileSync(bodyFile, body)
     const created = sh(
@@ -1809,12 +1814,12 @@ async function maybeUpdate(opts: Options, carry: Carry): Promise<boolean> {
     )
     if (created.code !== 0) throw new Error(`gh pr create failed: ${created.err}`)
     const pr = created.out.split('\n').find((l) => l.startsWith('https://')) ?? created.out
-    log(`harness update PR: ${pr}`)
+    log(`harness pin PR: ${pr}`)
     if (hold.length > 0 || !auto) {
       notify(
-        `harness update v${latest} waits for a merge${hold.length > 0 ? ` (${hold.join('; ')})` : ''}; the loop stays on v${installed}: ${pr}`,
+        `harness ${forward ? 'update' : 'rollback'} to v${target} waits for a merge${hold.length > 0 ? ` (${hold.join('; ')})` : ''}; the loop stays on v${installed}: ${pr}`,
       )
-      return false
+      return { state: 'waiting', pr }
     }
     const armed = sh('gh', ['pr', 'merge', pr, '--auto', '--squash', '--delete-branch'], {
       cwd: dir,
@@ -1822,21 +1827,109 @@ async function maybeUpdate(opts: Options, carry: Carry): Promise<boolean> {
     })
     if (armed.code !== 0) throw new Error(`gh pr merge --auto failed: ${armed.err}`)
     const waited = await waitForMerge(pr, true, new Set())
-    if (waited.state === 'merged') return takeUpdate(installed, latest, pr)
+    if (waited.state === 'merged') return { state: 'merged', pr }
     sh('gh', ['pr', 'merge', pr, '--disable-auto'], { quiet: true })
     notify(
-      `harness update v${latest}: CI ${waited.state === 'stalled' ? `reported nothing for ${CI_STALL_MIN} min` : 'failed'}; auto-merge disabled, the loop stays on v${installed}: ${pr}`,
+      `harness ${forward ? 'update' : 'rollback'} to v${target}: CI ${waited.state === 'stalled' ? `reported nothing for ${CI_STALL_MIN} min` : 'failed'}; auto-merge disabled, the loop stays on v${installed}: ${pr}`,
     )
-    return false
+    return { state: 'failed', pr }
   } catch (error) {
     if (aborting) throw error
     notify(
-      `harness update to v${latest} failed, the loop stays on v${installed}: ${error instanceof Error ? error.message : String(error)}`,
+      `harness ${forward ? 'update' : 'rollback'} to v${target} failed, the loop stays on v${installed}: ${error instanceof Error ? error.message : String(error)}`,
     )
-    return false
+    return { state: 'failed' }
   } finally {
     sh('git', ['worktree', 'remove', '--force', dir], { quiet: true })
     sh('git', ['branch', '-D', branch], { quiet: true })
+  }
+}
+
+let ghWarned = false
+
+/**
+ * Before a feature starts, with `update.auto`: move the pins to the release pickTarget chooses
+ * (src/update.ts): the newest one that is old enough, not breaking and not quarantined, or another
+ * release when the installed one is quarantined. Returns true when the default branch now has the
+ * new pins and the driver must restart. Each release is handled once per loop run.
+ */
+async function maybeUpdate(opts: Options, carry: Carry): Promise<boolean> {
+  if (!config.update.auto || isHarnessRepo(ROOT)) return false
+  if (!ghAvailable()) {
+    if (!ghWarned)
+      log('harness update skipped: gh is not logged in (releases and quarantines are read with gh)')
+    ghWarned = true
+    return false
+  }
+  const installed = packageVersion()
+  const repo = rolloutRepo(config)
+  let target: Target
+  try {
+    target = pickTarget({
+      installed,
+      releases: listReleases(repo, ROOT),
+      quarantined: listQuarantined(repo, ROOT),
+      now: Date.now(),
+      minAgeHours: config.update.minAgeHours,
+      allowBreaking: config.update.allowBreaking,
+    })
+  } catch (error) {
+    log(`harness update check skipped: ${error instanceof Error ? error.message : String(error)}`)
+    return false
+  }
+  if (target.action === 'none') {
+    if (target.reason) log(`harness update: ${target.reason}`)
+    return false
+  }
+  const version = target.version
+  if (carry.updates.includes(version)) return false
+  if (target.action === 'notify') {
+    carry.updates.push(version)
+    notify(target.reason)
+    return false
+  }
+  if (!opts.dryRun && defaultBranchPins(version)) {
+    carry.updates.push(version)
+    log(`${defaultBranch()} already pins harness v${version}; pulling it`)
+    try {
+      return takeUpdate(installed, version)
+    } catch (error) {
+      notify(
+        `harness update to v${version} failed, the loop stays on v${installed}: ${error instanceof Error ? error.message : String(error)}`,
+      )
+      return false
+    }
+  }
+  const forward = compareVersions(version, installed) > 0
+  const branch = pinBranch(version, forward)
+  if (sh('git', ['ls-remote', '--heads', remote(), `refs/heads/${branch}`], { quiet: true }).out) {
+    log(`harness update: ${branch} is still open`)
+    return false
+  }
+  carry.updates.push(version)
+  if (opts.dryRun) {
+    log(`would move harness v${installed} → v${version} before the next feature (${target.why}):`)
+    log(
+      `  git worktree add -b ${branch} … ${defaultBranch()}; pnpm add ${PACKAGE}@${pinSpec(version)}, marketplace ref, harness doctor`,
+    )
+    if (forward)
+      log(
+        `  harness selftest of v${installed} and v${version}; a regression quarantines v${version}`,
+      )
+    log(
+      `  ${config.project.init} with the L1 baseline; commit, push, PR; ${opts.autoMerge || config.merge === 'auto' ? 'auto-merge, wait, pull, pnpm install, restart' : 'then wait for a human merge'}`,
+    )
+    return false
+  }
+  const result = await pinPr(version, installed, opts, target.why)
+  if (result.state !== 'merged') return false
+  try {
+    return takeUpdate(installed, version, result.pr)
+  } catch (error) {
+    notify(
+      `harness pins moved to v${version} but the pull or install failed: ${error instanceof Error ? error.message : String(error)}`,
+    )
+    return false
   }
 }
 

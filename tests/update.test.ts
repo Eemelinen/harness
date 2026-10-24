@@ -12,7 +12,9 @@ import {
   latestRelease,
   newestTag,
   notPinOnly,
+  pickTarget,
   pinSpec,
+  quarantinedVersions,
   repositoryUrl,
   withMarketplaceRef,
 } from '../src/update'
@@ -157,5 +159,118 @@ describe('notPinOnly', () => {
       'package.json changes more than the @eemelinen/harness specifier',
       '.claude/settings.json changes more than the eemelinen-harness ref',
     ])
+  })
+})
+
+describe('quarantinedVersions', () => {
+  it('reads versions from open and completed issues, not from not-planned ones', () => {
+    expect([
+      ...quarantinedVersions([
+        { title: 'quarantine v0.3.5: guard blocks pnpm check (metsavahti)', state: 'OPEN' },
+        { title: 'quarantine v0.3.6: x', state: 'CLOSED', stateReason: 'COMPLETED' },
+        { title: 'quarantine v0.3.7: false alarm', state: 'CLOSED', stateReason: 'NOT_PLANNED' },
+        { title: 'quarantine v0.3.8 and v0.3.9', state: 'OPEN' },
+      ]),
+    ]).toEqual(['0.3.5', '0.3.6', '0.3.8', '0.3.9'])
+  })
+})
+
+describe('pickTarget', () => {
+  const now = Date.parse('2026-10-25T12:00:00Z')
+  const release = (version: string, hoursAgo: number, extra: object = {}) => ({
+    version,
+    publishedAt: new Date(now - hoursAgo * 3_600_000).toISOString(),
+    draft: false,
+    prerelease: false,
+    ...extra,
+  })
+  const base = {
+    installed: '0.3.1',
+    quarantined: new Set<string>(),
+    now,
+    minAgeHours: 6,
+    allowBreaking: false,
+  }
+
+  it('takes the newest release that is old enough', () => {
+    const releases = [release('0.3.1', 50), release('0.3.2', 30), release('0.3.3', 7)]
+    expect(pickTarget({ ...base, releases })).toEqual({
+      action: 'update',
+      version: '0.3.3',
+      why: 'newer release',
+    })
+  })
+
+  it('waits for a release that is too new, and takes it at once with minAgeHours 0', () => {
+    const releases = [release('0.3.2', 2)]
+    expect(pickTarget({ ...base, releases })).toEqual({
+      action: 'none',
+      reason: 'v0.3.2 is 2.0 h old; waiting until it is 6 h old (update.minAgeHours)',
+    })
+    expect(pickTarget({ ...base, releases, minAgeHours: 0 })).toMatchObject({ version: '0.3.2' })
+  })
+
+  it('takes an older ready release while the newest one is still too new', () => {
+    const releases = [release('0.3.2', 10), release('0.3.3', 1)]
+    expect(pickTarget({ ...base, releases })).toMatchObject({ action: 'update', version: '0.3.2' })
+  })
+
+  it('skips quarantined releases, drafts and prereleases', () => {
+    const releases = [
+      release('0.3.2', 20),
+      release('0.3.3', 20),
+      release('0.3.4', 20, { draft: true }),
+      release('0.3.5', 20, { prerelease: true }),
+    ]
+    expect(pickTarget({ ...base, releases, quarantined: new Set(['0.3.3']) })).toMatchObject({
+      version: '0.3.2',
+    })
+  })
+
+  it('does nothing when up to date', () => {
+    expect(pickTarget({ ...base, releases: [release('0.3.1', 50)] })).toEqual({ action: 'none' })
+  })
+
+  it('reports a breaking release instead of taking it, unless allowed', () => {
+    const releases = [release('0.4.0', 20)]
+    expect(pickTarget({ ...base, releases })).toMatchObject({
+      action: 'notify',
+      version: '0.4.0',
+      reason: expect.stringContaining('update.allowBreaking'),
+    })
+    expect(pickTarget({ ...base, releases, allowBreaking: true })).toMatchObject({
+      action: 'update',
+      version: '0.4.0',
+    })
+    expect(
+      pickTarget({ ...base, releases: [release('0.3.2', 20), release('0.4.0', 20)] }),
+    ).toMatchObject({ action: 'update', version: '0.3.2' })
+  })
+
+  it('moves off a quarantined installed release: forward to the fix, at any age', () => {
+    const releases = [release('0.3.0', 90), release('0.3.1', 50), release('0.3.2', 1)]
+    expect(pickTarget({ ...base, releases, quarantined: new Set(['0.3.1']) })).toEqual({
+      action: 'update',
+      version: '0.3.2',
+      why: 'v0.3.1 is quarantined',
+    })
+  })
+
+  it('moves back when there is no fix yet', () => {
+    const releases = [release('0.2.9', 200), release('0.3.0', 90), release('0.3.1', 50)]
+    expect(pickTarget({ ...base, releases, quarantined: new Set(['0.3.1']) })).toEqual({
+      action: 'update',
+      version: '0.3.0',
+      why: 'v0.3.1 is quarantined',
+    })
+    expect(
+      pickTarget({ ...base, releases, quarantined: new Set(['0.3.0', '0.3.1']) }),
+    ).toMatchObject({ version: '0.2.9' })
+  })
+
+  it('asks for a human when a quarantined installed release has nowhere to go', () => {
+    expect(
+      pickTarget({ ...base, releases: [release('0.3.1', 50)], quarantined: new Set(['0.3.1']) }),
+    ).toMatchObject({ action: 'notify', version: '0.3.1' })
   })
 })

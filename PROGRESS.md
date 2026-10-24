@@ -53,6 +53,13 @@ this file to change on every branch; keep that heading text exactly.
   here. All three projects passed it read-only. The release script now reads breaking changes from
   the config schema diff, because loop PR titles never carry `!`. Run records carry the harness
   version. Verification: `pnpm harness:verify F-006`.
+- F-007 (part 2 of 3): `pickTarget` takes the newest release that is old enough
+  (`update.minAgeHours`, default 6; 0 for a canary), not breaking and not quarantined. Releases and
+  `harness-quarantine` issues are read with `gh`; `git ls-remote` is only a fallback for
+  `harness update` without `gh`. A project on a quarantined release moves forward to the fix or back
+  (`harness/rollback-vX`). The update PR runs the old and the new selftest, and a regression
+  quarantines the release through `src/quarantine.ts`. That issue carries a feature block for this
+  repo's intake, with one fingerprint per version. Verification: `pnpm harness:verify F-007`.
 - `src/update.ts` and `scripts/release.ts` were added to this repository's reviewPaths: one decides
   which update PRs skip a project's merge gate, the other runs with a token that can push to main.
 - Known risk: neither the release workflow nor a real update-and-restart has run yet. They need

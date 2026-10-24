@@ -53,6 +53,11 @@ runs `scripts/release.ts` on the commits since the last `v*` tag:
   it and pushes both to `main`, then creates the GitHub release. Sessions never bump the version,
   edit the changelog or tag.
 
+**Quarantine.** To keep projects off a bad release, open an issue in this repository labelled
+`harness-quarantine` with the version in its title (loops with `update.auto` file one themselves
+when a release regresses). Close it as **not planned** to lift it; the fix PR closes it as
+completed, which keeps the bad release quarantined.
+
 One-time setup: `main` is protected, so `GITHUB_TOKEN` cannot push the release commit. Create a
 fine-grained personal access token with **Contents: read and write** on `Eemelinen/harness`, store it
 as the repository secret `RELEASE_TOKEN`, and let it bypass the `main` protection (branch protection:

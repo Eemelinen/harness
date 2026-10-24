@@ -113,10 +113,10 @@
       "area": "loop",
       "title": "Staged rollout and quarantine of harness releases",
       "user_visible_behavior": "With update.auto the loop takes the newest release that is at least update.minAgeHours old (default 6, 0 for a canary), not a draft or prerelease and not quarantined. A version is quarantined by an open or completed harness-quarantine issue in the harness repository; closing it as not planned lifts it. A project on a quarantined version moves to the newest eligible release or back to an older one. The update PR runs the old and the new selftest; a check that regresses quarantines the release with the evidence instead of opening the PR.",
-      "status": "not_started",
+      "status": "passing",
       "depends_on": ["F-006"],
       "verification": ["L1: pnpm check"],
-      "evidence": [],
+      "evidence": ["2026-10-24 pnpm check → pass (working tree on 03fb1c5)"],
       "attempts": 0,
       "notes": "Requested 2026-10-24: catch a bad release in one project and keep it from reaching the others."
     },
