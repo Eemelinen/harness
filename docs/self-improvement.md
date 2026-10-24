@@ -90,9 +90,9 @@ fix on an auto-merge PR passes the same gate before it is pushed; if it now need
 driver disables auto-merge and hands the PR over. A held PR's body says why, the driver notifies
 you, and the loop continues with features that do not depend on it.
 
-Harness fixes reach a project only when you cut a release and move the project's pins
-([developing.md](developing.md)), so a fix the loop got wrong cannot spread to a running loop
-unnoticed.
+A merged harness fix is released automatically, but it reaches a project only when the project's
+pins move ([developing.md](developing.md) → Releasing), so a fix the loop got wrong cannot spread
+to a running loop unnoticed.
 
 ## Turning it on
 
@@ -121,5 +121,5 @@ with retros.
 - A harness finding is seen from one project's traces. The fingerprint merges reports of the same
   problem from several projects into one issue.
 - Fixes in the harness repository are built by that repository's own loop (it is a harness project
-  too). Until a release moves the pins, projects keep reporting the problem they still have; those
+  too). Until the project's pins move to the release, projects keep reporting the problem they still have; those
   reports land as comments on the closed issue.

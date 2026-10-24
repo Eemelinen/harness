@@ -67,6 +67,32 @@
       "evidence": ["2026-10-24 pnpm check → pass (working tree on a2a17d1)"],
       "attempts": 0,
       "notes": "idea-generator feat/F-006 and personal-finances feat/F-002 survived their merges (the first merge before delete_branch_on_merge was on), so every queue-empty notice said they were in flight."
+    },
+    {
+      "id": "F-004",
+      "priority": 4,
+      "area": "release",
+      "title": "Merges that change the package are released automatically",
+      "user_visible_behavior": "After CI passes on main, a release workflow bumps the version (patch by default; minor for a breaking change while 0.x), adds a CHANGELOG entry from the commit subjects, commits chore: release vX.Y.Z, tags it, pushes and creates the GitHub release. Merges that change no shipped path (docs, tests, state files) release nothing.",
+      "status": "passing",
+      "depends_on": [],
+      "verification": ["L1: pnpm check"],
+      "evidence": ["2026-10-24 pnpm check → pass (working tree on eb4150a)"],
+      "attempts": 0,
+      "notes": "Requested 2026-10-24: the self-improvement loop merges to main, but the changes reach projects only after a human cuts a release. main is protected, so the workflow pushes with a RELEASE_TOKEN secret that may bypass the protection."
+    },
+    {
+      "id": "F-005",
+      "priority": 5,
+      "area": "loop",
+      "title": "Project loops update to the newest harness release before each feature",
+      "user_visible_behavior": "With update.auto, before picking a feature the loop driver checks for a newer harness release; it opens a harness/update-vX.Y.Z PR that changes only the package pin and the plugin marketplace ref (checked with doctor and the L1 baseline), auto-merges it when the merge policy is auto, pulls, reinstalls and restarts itself on the new version. harness update [--check] does the same by hand. Off by default.",
+      "status": "not_started",
+      "depends_on": ["F-004"],
+      "verification": ["L1: pnpm check"],
+      "evidence": [],
+      "attempts": 0,
+      "notes": "Requested 2026-10-24: updating every project by hand in the middle of a loop is the bottleneck once releases are automatic (F-004). Breaking releases need update.allowBreaking."
     }
   ]
 }

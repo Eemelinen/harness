@@ -2,8 +2,8 @@
 
 The harness lets a coding agent work on a repository one feature at a time without drifting, and
 lets a driver run those sessions unattended, one pull request per feature. It is the single source
-of truth for every project that uses it: improve it here, tag a release, bump the pin in each
-project.
+of truth for every project that uses it: improve it here, and every merge that changes the package
+is released as a new tag; each project then moves its pin.
 
 It ships two ways, always used together and pinned to the same tag:
 

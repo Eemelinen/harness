@@ -11,7 +11,8 @@ this file to change on every branch; keep that heading text exactly.
 - Standard verification path: L1 `pnpm check` (typecheck, Prettier, `harness check`, Vitest). Per
   feature: `pnpm harness:verify F-NNN`.
 - The repository runs its own loop: features come from `harness-retro` issues filed by project
-  retros (docs/self-improvement.md). Releases stay manual (docs/developing.md → Releasing).
+  retros (docs/self-improvement.md). Merges that change a shipped path are released by
+  `.github/workflows/release.yml` (docs/developing.md → Releasing); it needs the `RELEASE_TOKEN` secret.
 - Last verified: F-003 on this commit, `pnpm check` green on 2026-10-24.
 - Highest-priority unfinished feature: none (F-001…F-003 passing).
 - Current blocker: none.
@@ -25,6 +26,17 @@ this file to change on every branch; keep that heading text exactly.
 3. Build open `harness-retro` issues as they arrive (`pnpm harness:loop`, intake picks them up).
 
 ## Session Log
+
+### Session 003 — 2026-10-24 (automatic releases, project updates)
+
+- Goal: release every merge that changes the package (F-004) and let project loops move to the
+  newest release before each feature (F-005), both requested by hand.
+- F-004: `scripts/release.ts` (not `src/`: repository tooling, not shipped) bumps the patch number,
+  or the minor number for a `!`/`BREAKING CHANGE` commit while 0.x; it releases nothing when no
+  `package.json` `files` path changed. `release.yml` runs it after CI passes on a push to main and
+  pushes with `RELEASE_TOKEN`, because main is protected. Verification: `pnpm harness:verify F-004`.
+- Known risk: the workflow is untested until the first merge with the secret set; the changelog
+  is now a list of commit subjects instead of curated prose.
 
 ### Session 002 — 2026-10-24 (fixes from the first overnight loops)
 

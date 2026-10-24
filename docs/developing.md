@@ -32,14 +32,38 @@ linked package means driver runs use your checkout as well. Do not commit the `l
 
 ## Releasing
 
-1. **Version and changelog.** Bump `version` in `package.json` (semver: a config key removed or
-   renamed, or a changed CLI flag, is a major change). Add the entry to `CHANGELOG.md`.
-2. **Check.** Run `pnpm check`.
-3. **Commit and tag.** Commit, then `git tag vX.Y.Z && git push origin main vX.Y.Z`.
-4. **Update each project:**
-   - `pnpm add -D "@eemelinen/harness@github:Eemelinen/harness#vX.Y.Z"`
-   - set the marketplace `ref` in `.claude/settings.json` to `vX.Y.Z`
-   - `pnpm harness:doctor`, then `pnpm check`
-   - commit as `chore(harness): update to vX.Y.Z`
-   - interactive sessions pick the new plugin up after `claude plugin marketplace update eemelinen-harness`
-     (or a restart with auto-update on)
+Releases are automatic. After CI passes on `main`, [release.yml](../.github/workflows/release.yml)
+runs `scripts/release.ts` on the commits since the last `v*` tag:
+
+- **Only shipped changes release.** If no path in `package.json` `files` (`bin`, `src`, `prompts`,
+  `plugin`, `schema`, `templates`, `.claude-plugin`) and not `package.json` itself changed, nothing
+  is released: docs, tests and state files reach no project.
+- **Version.** Every release bumps the patch number. A breaking change (a config key removed or
+  renamed, a changed CLI flag) bumps the minor number while the version is 0.x and the major number
+  after that; mark it with `!` in the commit subject (`feat(F-012)!: …`) or a `BREAKING CHANGE:`
+  footer. Squash merges keep the PR title as the subject, so put the `!` there.
+- **Changelog.** One `CHANGELOG.md` bullet per commit subject (without its `type(scope):`
+  prefix); `docs`, `test`, `ci` and `style` commits are left out. The same lines become the GitHub
+  release notes.
+- **Commit, tag, push.** The workflow commits `chore: release vX.Y.Z` (version and changelog), tags
+  it and pushes both to `main`, then creates the GitHub release. Sessions never bump the version,
+  edit the changelog or tag.
+
+One-time setup: `main` is protected, so `GITHUB_TOKEN` cannot push the release commit. Create a
+fine-grained personal access token with **Contents: read and write** on `Eemelinen/harness`, store it
+as the repository secret `RELEASE_TOKEN`, and let it bypass the `main` protection (branch protection:
+allow its owner to bypass; a ruleset: add its owner to the bypass list). Without the secret the
+checkout fails and nothing is released.
+
+To release by hand (a release that failed, or a change the filter skipped), re-run the workflow
+from the Actions tab, or run the same steps locally: `pnpm exec tsx scripts/release.ts`, then
+`git push --atomic origin HEAD:main vX.Y.Z`.
+
+**Update each project** to a new release:
+
+- `pnpm add -D "@eemelinen/harness@github:Eemelinen/harness#vX.Y.Z"`
+- set the marketplace `ref` in `.claude/settings.json` to `vX.Y.Z`
+- `pnpm harness:doctor`, then `pnpm check`
+- commit as `chore(harness): update to vX.Y.Z`
+- interactive sessions pick the new plugin up after `claude plugin marketplace update eemelinen-harness`
+  (or a restart with auto-update on)
