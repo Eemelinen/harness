@@ -13,8 +13,8 @@ this file to change on every branch; keep that heading text exactly.
 - The repository runs its own loop: features come from `harness-retro` issues filed by project
   retros (docs/self-improvement.md). Merges that change a shipped path are released by
   `.github/workflows/release.yml` (docs/developing.md → Releasing); it needs the `RELEASE_TOKEN` secret.
-- Last verified: F-013 on this branch, `pnpm check` green on 2026-10-24.
-- Highest-priority unfinished feature: none (F-000…F-013 passing).
+- Last verified: F-014 on this branch, `pnpm check` green on 2026-10-24.
+- Highest-priority unfinished feature: none (F-000…F-014 passing).
 - Current blocker: none.
 
 ## Next Steps
@@ -102,6 +102,10 @@ this file to change on every branch; keep that heading text exactly.
 - The intake is gated on `updater:accepted` (`retro.intakeLabel` in this repo's config):
   harness-updater (Docker, triage mode) validates each retro and quarantine issue first, and this
   loop builds only the ones it accepted. A config-only change: nothing is released.
+- F-014 (proposed by harness-updater's triage of #11): the restarted driver's output is teed to
+  `.harness/traces/driver-vX-<time>.log` (`spawnTee`). A crash before the first feature settles puts
+  its error line (`crashMessage`) into the rollback reason and the quarantine cause, with an excerpt
+  and the log path. Verification: `pnpm harness:verify F-014`.
 - Bootstrapping: rollback and re-test run in the version a project rolls back to, so they are
   complete only from the release after the one that ships F-008. Until then the staged rollout and
   the selftest (F-007) are the guard.

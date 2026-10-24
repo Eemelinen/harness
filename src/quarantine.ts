@@ -65,6 +65,23 @@ export function excerptLog(text: string, maxLines = 30, maxChars = 1400): string
   return kept
 }
 
+/**
+ * The error a crashed driver reported: the CLI's last `harness: <message>` line, else the last line
+ * that names an error. Undefined when the output says nothing.
+ */
+export function crashMessage(output: string): string | undefined {
+  const lines = output
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean)
+  const cli = lines.filter((l) => /^harness: /.test(l)).at(-1)
+  if (cli) return cli.replace(/^harness: /, '').slice(0, 300)
+  return lines
+    .filter((l) => /Error\b|\berror\b|ERR_/.test(l))
+    .at(-1)
+    ?.slice(0, 300)
+}
+
 function detailLines(r: QuarantineReport): string[] {
   return [
     ...(r.excerpt?.length

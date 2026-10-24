@@ -1,9 +1,11 @@
 import { spawnSync } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { resolveCommand, sessionEnv } from '../src/run'
+import { resolveCommand, sessionEnv, spawnTee } from '../src/run'
 
 describe('resolveCommand', () => {
   afterEach(() => vi.unstubAllEnvs())
@@ -81,5 +83,18 @@ describe('sessionEnv', () => {
     })
     expect(res.status).not.toBe(0)
     expect(res.stdout.trim()).toBe('')
+  })
+})
+
+describe('spawnTee', () => {
+  it('keeps a crashed process output in the log as well', async () => {
+    const log = path.join(mkdtempSync(path.join(tmpdir(), 'harness-tee-')), 'traces', 'driver.log')
+    const script =
+      "console.log('preflight'); console.error('harness: pnpm harness:doctor reports errors'); process.exit(3)"
+    const result = await spawnTee(process.execPath, ['-e', script], log, { cwd: tmpdir() })
+    expect(result).toEqual({ code: 3, signal: null })
+    const text = readFileSync(log, 'utf8')
+    expect(text).toContain('preflight')
+    expect(text).toContain('harness: pnpm harness:doctor reports errors')
   })
 })

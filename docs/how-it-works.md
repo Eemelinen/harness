@@ -175,7 +175,8 @@ release first, so a bad release is caught there and kept away from the others:
    version. The features it already tried, the retro count and the failure count carry over.
    Before restarting, it checks that the new version is really the one installed, and a restarted
    driver checks that it is the version on probation. A mismatch stops the loop with an error and
-   is never blamed on the release.
+   is never blamed on the release. The restarted driver's output also goes to
+   `.harness/traces/driver-vX.Y.Z-<time>.log`.
 
 **Probation.** The first feature after an update runs on probation, and what happens next depends on
 how it ends:
@@ -197,7 +198,8 @@ how it ends:
 If the restarted driver itself exits with an error before its first feature settles, the previous
 driver, which is still waiting for it, rolls back. It runs its own preflight on the old version and
 quarantines the release only when that passes, so an environment problem doesn't count against the
-release. A rollback that can't auto-merge stops the loop, so nothing more runs on a suspect release.
+release. The rollback PR and the quarantine issue carry the crashed driver's error line, an
+excerpt of its output and the path of its log. A rollback that can't auto-merge stops the loop, so nothing more runs on a suspect release.
 
 When the canary's update doesn't merge, or its re-test is inconclusive, it releases its claim so
 another loop can test the release. A quarantine closes the rollout issue with a link to the

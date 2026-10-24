@@ -20,8 +20,14 @@ vi.mock('../src/run', async (original) => ({
   },
 }))
 
-const { excerptLog, quarantine, quarantineBody, quarantineFingerprint, quarantineTitle } =
-  await import('../src/quarantine')
+const {
+  crashMessage,
+  excerptLog,
+  quarantine,
+  quarantineBody,
+  quarantineFingerprint,
+  quarantineTitle,
+} = await import('../src/quarantine')
 const { fingerprintOf, issueContext, parseIssueFeature } = await import('../src/retro')
 const { quarantinedVersions } = await import('../src/update')
 
@@ -105,6 +111,26 @@ describe('excerptLog', () => {
     expect(lines.join('\n').length).toBeLessThanOrEqual(1400)
     expect(lines.every((l) => l.length <= 240 && !l.includes('```'))).toBe(true)
     expect(lines.at(-1)).toContain('failure 99')
+  })
+})
+
+describe('crashMessage', () => {
+  it("finds the CLI's error in a restarted driver's output", () => {
+    // What the metsavahti driver printed when it restarted onto the wrong version (harness #11).
+    const output = [
+      '[harness 09:39:42] restarted on harness v0.3.1',
+      '[harness 09:39:42] preflight',
+      '[harness 09:39:42] doctor: error plugin marketplace ref is v0.3.2 but the installed package is 0.3.1',
+      'harness: pnpm harness:doctor reports errors; fix them first',
+    ].join('\n')
+    expect(crashMessage(output)).toBe('pnpm harness:doctor reports errors; fix them first')
+  })
+
+  it('falls back to the last line that names an error, or nothing', () => {
+    expect(crashMessage('starting\nTypeError: x is not a function\n    at y')).toBe(
+      'TypeError: x is not a function',
+    )
+    expect(crashMessage('all fine\n')).toBeUndefined()
   })
 })
 

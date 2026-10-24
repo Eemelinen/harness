@@ -1,6 +1,6 @@
 /** Process helpers shared by the commands. */
-import { spawnSync, type SpawnSyncReturns } from 'node:child_process'
-import { mkdirSync } from 'node:fs'
+import { spawn, spawnSync, type SpawnSyncReturns } from 'node:child_process'
+import { createWriteStream, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -53,6 +53,36 @@ export function sh(
     maxBuffer: 64 * 1024 * 1024,
   })
   return { code: res.status ?? 1, out: (res.stdout ?? '').trim(), err: (res.stderr ?? '').trim() }
+}
+
+/**
+ * Runs a process with its output both on this terminal and in `logFile`, so a crash's error lines
+ * are kept for the evidence. Resolves once the process exited and the log is flushed.
+ */
+export function spawnTee(
+  command: string,
+  args: string[],
+  logFile: string,
+  opts: { cwd: string; env?: NodeJS.ProcessEnv },
+): Promise<{ code: number; signal: NodeJS.Signals | null }> {
+  mkdirSync(path.dirname(logFile), { recursive: true })
+  const log = createWriteStream(logFile)
+  return new Promise((resolve) => {
+    const child = spawn(command, args, {
+      cwd: opts.cwd,
+      env: opts.env ?? process.env,
+      stdio: ['inherit', 'pipe', 'pipe'],
+    })
+    child.stdout.on('data', (chunk: Buffer) => {
+      process.stdout.write(chunk)
+      log.write(chunk)
+    })
+    child.stderr.on('data', (chunk: Buffer) => {
+      process.stderr.write(chunk)
+      log.write(chunk)
+    })
+    child.on('close', (code, signal) => log.end(() => resolve({ code: code ?? 1, signal })))
+  })
 }
 
 /** Variables through which `gh` and git reach a GitHub token. */
