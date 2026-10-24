@@ -61,10 +61,10 @@
       "area": "loop",
       "title": "Queue-empty notice lists only unmerged feature branches",
       "user_visible_behavior": "The queue-empty notice no longer names features that are already passing on the default branch as in flight; it names their leftover branches separately so a human can delete them.",
-      "status": "not_started",
+      "status": "passing",
       "depends_on": [],
       "verification": ["L1: pnpm check"],
-      "evidence": [],
+      "evidence": ["2026-10-24 pnpm check → pass (working tree on a2a17d1)"],
       "attempts": 0,
       "notes": "idea-generator feat/F-006 and personal-finances feat/F-002 survived their merges (the first merge before delete_branch_on_merge was on), so every queue-empty notice said they were in flight."
     }

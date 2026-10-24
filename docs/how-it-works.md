@@ -89,7 +89,9 @@ stateDiagram-v2
 `attempts` counts driver-run sessions; `max_attempts` (feature field or `caps.maxAttempts`)
 auto-blocks. `ready` = `not_started` with every dependency `passing`; the driver additionally skips
 features with a `manual:` step (human-only) and features whose branch already exists on the remote
-(in flight).
+(in flight). When nothing is ready, the queue-empty notice lists those in-flight features, and names
+separately any branch whose feature is already `passing` (a leftover of a merged PR, safe to
+delete).
 
 ## 3. What each safeguard catches
 

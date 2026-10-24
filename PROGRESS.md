@@ -12,13 +12,17 @@ this file to change on every branch; keep that heading text exactly.
   feature: `pnpm harness:verify F-NNN`.
 - The repository runs its own loop: features come from `harness-retro` issues filed by project
   retros (docs/self-improvement.md). Releases stay manual (docs/developing.md → Releasing).
-- Last verified: F-002 on this commit, `pnpm check` green on 2026-10-24.
-- Highest-priority unfinished feature: F-003 (in-flight notice).
+- Last verified: F-003 on this commit, `pnpm check` green on 2026-10-24.
+- Highest-priority unfinished feature: none (F-001…F-003 passing).
 - Current blocker: none.
 
 ## Next Steps
 
-1. Build open `harness-retro` issues as they arrive (`pnpm harness:loop`, intake picks them up).
+1. Review and merge this branch (stacked on `feat/retro`, PR #3); it changes the guard, hooks and
+   prompts, so it waits for a human.
+2. Cut a release so the projects pick up F-001…F-003; until then their `generator-notes.md` carry
+   the no-self-evaluation rule.
+3. Build open `harness-retro` issues as they arrive (`pnpm harness:loop`, intake picks them up).
 
 ## Session Log
 
@@ -39,6 +43,12 @@ this file to change on every branch; keep that heading text exactly.
   - 2 recorded as 2). `mergeResult` sums `num_turns`; `total_cost_usd`, `modelUsage` and
     `duration_api_ms` are already session totals in every segment (checked against three traces), so
     the cost was right. Verification: `pnpm harness:verify F-002` → L1 pass.
+- F-003: the queue-empty notice called `feat/F-006` (idea-generator) and `feat/F-002`
+  (personal-finances) in flight, though both had merged; their remote branches survived the first
+  merge in each repo. `queueEmptyNotice` names branches of `passing` features separately as safe to
+  delete. Verification: `pnpm harness:verify F-003` → L1 pass.
+- Known risk: none of this reaches the projects before a release; the `Agent|Task` matcher is new,
+  so watch the first loop after the release for unexpected denials.
 
 ### Session 001 — 2026-10-23 (self-hosting bootstrap)
 

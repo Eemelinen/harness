@@ -4,7 +4,7 @@ import path from 'node:path'
 
 import { describe, expect, it } from 'vitest'
 
-import { mergeResult, pluginDir } from '../src/loop'
+import { mergeResult, pluginDir, queueEmptyNotice } from '../src/loop'
 
 function dir(name: string, pkg: object) {
   const root = mkdtempSync(path.join(tmpdir(), `harness-${name}-`))
@@ -59,5 +59,25 @@ describe('mergeResult', () => {
   it('passes a single result through unchanged', () => {
     const only = { type: 'result', num_turns: 40, total_cost_usd: 3 }
     expect(mergeResult(undefined, only)).toBe(only)
+  })
+})
+
+describe('queueEmptyNotice', () => {
+  const list = {
+    features: [
+      { id: 'F-002', status: 'passing' as const },
+      { id: 'F-015', status: 'not_started' as const },
+    ],
+  }
+
+  it('names a merged leftover branch separately from work in flight', () => {
+    // personal-finances: feat/F-002 survived its merge, feat/F-015 holds a blocked attempt.
+    expect(queueEmptyNotice(['F-002', 'F-015'], list, 'feat/')).toBe(
+      'queue empty (F-015 in flight — merge their PRs to unblock dependents); leftover branches of passing features, safe to delete: feat/F-002',
+    )
+  })
+
+  it('says only that the queue is empty when no branch is left', () => {
+    expect(queueEmptyNotice([], list, 'feat/')).toBe('queue empty')
   })
 })

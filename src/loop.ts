@@ -290,6 +290,27 @@ function branchFor(id: string) {
   return `${config.project.branchPrefix}${id}`
 }
 
+/**
+ * The notice when nothing is ready. A branch whose feature is already passing on the default
+ * branch is a leftover of a merged PR (a merge before delete-branch-on-merge was on), not work in
+ * flight, so it is named separately for a human to delete.
+ */
+export function queueEmptyNotice(
+  inFlight: string[],
+  list: { features: Pick<Feature, 'id' | 'status'>[] },
+  branchPrefix: string,
+): string {
+  const passing = new Set(list.features.filter((f) => f.status === 'passing').map((f) => f.id))
+  const open = inFlight.filter((id) => !passing.has(id))
+  const stale = inFlight.filter((id) => passing.has(id))
+  let notice = 'queue empty'
+  if (open.length)
+    notice += ` (${open.join(', ')} in flight — merge their PRs to unblock dependents)`
+  if (stale.length)
+    notice += `; leftover branches of passing features, safe to delete: ${stale.map((id) => `${branchPrefix}${id}`).join(', ')}`
+  return notice
+}
+
 function worktreePath(id: string) {
   return path.join(worktreeRoot(project), id)
 }
@@ -1690,10 +1711,7 @@ export async function loopCommand(argv: string[]): Promise<number> {
     if (!feature) {
       // A retro may file issues the intake picks up; look again before stopping.
       if (retroIfDue('queue-empty') && config.retro.intake) continue
-      const waiting = inFlight.length
-        ? ` (${inFlight.join(', ')} in flight — merge their PRs to unblock dependents)`
-        : ''
-      notify(`queue empty${waiting}`)
+      notify(queueEmptyNotice(inFlight, list, config.project.branchPrefix))
       break
     }
     attempted.add(feature.id)
