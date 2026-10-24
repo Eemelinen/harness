@@ -158,6 +158,19 @@
       "evidence": ["2026-10-24 pnpm check → pass (working tree on 35317d5)"],
       "attempts": 0,
       "notes": "Requested 2026-10-24: the evidence named traces relative to the project, so a fixing session in the harness repository could not open them."
+    },
+    {
+      "id": "F-011",
+      "priority": 11,
+      "area": "retro",
+      "title": "Retro intake can be gated on a triage label",
+      "user_visible_behavior": "With retro.intakeLabel set, the loop intake takes only open retro issues that also carry that label; unset keeps todays behaviour. The package exports the issue, quarantine and rollout readers a triage service needs (parseIssueFeature, fingerprintOf, issueContext, quarantinedVersions, rolloutStates and the label names).",
+      "status": "passing",
+      "depends_on": ["F-010"],
+      "verification": ["L1: pnpm check"],
+      "evidence": ["2026-10-24 pnpm check → pass (working tree on 89e7994)"],
+      "attempts": 0,
+      "notes": "Requested 2026-10-24 for harness-updater: a Docker service that validates each harness issue against the consumer repositories before the harness loop builds it."
     }
   ]
 }

@@ -57,6 +57,11 @@ its own repository that is not labelled `harness-retro:queued`. It:
   protected and the driver never pushes it; the PR that builds the fix also adds the feature.
 - runs it like any feature: generator, post-check, evaluator, PR with `Closes #N`
 
+With `retro.intakeLabel` set, only issues that also carry that label are taken. The harness
+repository uses it as a triage gate: [harness-updater](https://github.com/Eemelinen/harness-updater)
+validates each new issue against the repositories that use the harness and labels it
+`updater:accepted`, or rejects it.
+
 Retro issues run before the feature list's own ready features. To change what the loop builds,
 edit the `harness-feature` block in the issue before it is queued. To reject a finding, close the
 issue as not planned: the retro will not file it again.
