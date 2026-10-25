@@ -70,6 +70,12 @@ sequenceDiagram
             D->>GH: Accept → git push (auto-merge still armed) · flaky → gh run rerun --failed once
             D->>GH: give up → gh pr merge --disable-auto, PR comment, next independent feature
         end
+        opt auto-merge and the PR conflicts with main (mergeable CONFLICTING; GitHub runs no CI)
+            D->>D: git fetch; git merge origin/main in the worktree
+            D->>GH: clean → init.sh (L1), git push, wait again
+            D->>G: conflicts or red L1 → fixer session (prompts/conflict-fixer.md: keep both sides), a CI fix attempt
+            D->>GH: same post-check, evaluator and merge gate → git push · give up: "conflicts with main"
+        end
         D->>D: git worktree remove; git pull; next feature
     end
 ```
@@ -111,7 +117,7 @@ delete).
 | Evaluator (fresh context, read-only)                | Work that passes its own tests but misses the behaviour, scope creep, stale evidence, bad handoff                                                                                                                                                                                                                                     | plugin `agents/evaluator.md`, project rubric           |
 | Caps                                                | Runaway sessions: turns, budget, wall clock, attempts, consecutive failures                                                                                                                                                                                                                                                           | `harness.config.json`                                  |
 | CI on the PR                                        | Everything again on a clean runner                                                                                                                                                                                                                                                                                                    | project `.github/workflows/`                           |
-| CI fixer                                            | A PR that passed locally but fails CI (different env, production build, runner): fixed, reviewed and pushed, re-run once if flaky, or given up with auto-merge disabled instead of hanging the loop                                                                                                                                   | `harness loop`, `prompts/ci-fixer.md`                  |
+| CI fixer                                            | A PR that passed locally but fails CI (different env, production build, runner): fixed, reviewed and pushed, re-run once if flaky, or given up with auto-merge disabled instead of hanging the loop. A PR that conflicts with the default branch gets it merged in, by the driver or a fixer session                                  | `harness loop`, `prompts/ci-fixer.md`                  |
 
 ## 4. Operating the loop
 
@@ -243,6 +249,8 @@ log (`src/events.ts` formats the stream):
 - the post-check problems, the evaluator's scores and findings, each CI check as it finishes, and the merge
 - on red CI: `=== F-NNN CI fix 1/2`, the fixer session like a generator session, then
   `fixer says <classification> …; N new commit(s) → evaluate | rerun | retry | give-up`
+- on a conflict: `PR conflicts with its base branch`, `merging origin/main into feat/F-NNN`, then
+  `merged … cleanly, L1 passed, pushed` or `merge conflicts in: …` and a fixer session
 
 Every `runs.jsonl` record names the harness version it ran on, and `harness report` shows it, so
 a failure can be traced to the release it ran on.
@@ -274,6 +282,39 @@ nothing unreviewed merges later, pushes the branch and comments the reason and l
 PR. It notifies you and continues with features that do not depend on it. A PR whose CI reports
 nothing for 20 minutes is given up the same way. The worktree stays. To take over, fix the branch
 there, push, and merge or re-enable auto-merge.
+
+**When the PR conflicts with the default branch.** Another PR that touched the same files (a human
+fix, an update PR, the feature that unblocked this one) can merge while a feature is being built.
+GitHub runs no `pull_request` checks on a conflicting PR, so waiting for CI would only stall. With
+auto-merge, the driver reads `mergeable` in its poll. Only `CONFLICTING` counts, and only for the
+head it pushed: GitHub reports `UNKNOWN` for a while after a push. Then the driver:
+
+1. Fetches the default branch and merges it into the feature branch in its worktree. It
+   fast-forwards the default branch of its own checkout too, so the merge gate and the post-check
+   diff against the current one.
+2. **Clean merge:** runs `init.sh` (installs the merged dependencies and runs the L1 baseline) and
+   pushes; auto-merge is still armed and CI runs. Main's changes were reviewed already, so a clean
+   merge does not go through the evaluator.
+3. **Conflicts:** the merge stays in progress and the conflicting files go to a fixer session
+   (`prompts/conflict-fixer.md`). It is told to keep both sides, re-verify the feature and commit the
+   merge. A clean merge that fails `init.sh` goes to the same session with the output tail. The
+   session counts as a CI fix attempt (`caps.maxCiFixAttempts`), and its commit goes through the same
+   post-check, evaluator and merge gate as a CI fix before it is pushed.
+
+The driver gives up on the PR, as above, only when:
+
+- the merge cannot be made (no fetch, the branch already contains the default branch, no push);
+- the fixer attempts run out (with `caps.maxCiFixAttempts` 0, at once);
+- the fixer leaves the merge to a human (`out_of_scope`: the two sides contradict each other) or
+  blocks the feature;
+- the evaluator returns Block on the resolution (the feature is blocked);
+- the merge gate holds the resolution for a human review, or its push fails.
+
+The reason then reads "conflicts with <default branch>: …" (after a fixer session, "conflicts with
+<default branch>: fix N/M: …"), never a CI stall. An unfinished merge is aborted before auto-merge
+is disabled and the branch is pushed, so the worktree a human takes over is clean.
+The update and rollback PRs (`pinPr`) have no fixer: on a conflict the driver disables their
+auto-merge and reports "conflicts with <default branch>".
 
 **Intervening.** Merge or close the PR (a closed PR stops the loop for that feature). Unblock a feature with
 `pnpm harness:feature unblock F-NNN` after fixing the cause; lower or raise the caps in

@@ -231,7 +231,7 @@ export function selftest(root: string = process.cwd()): Check[] {
       JSON.parse(readFileSync(path.join(PACKAGE_ROOT, 'prompts', 'evaluator-schema.json'), 'utf8'))
       return 'ok'
     }),
-    ...['ci-fixer.md', 'safety-review.md'].map((name) =>
+    ...['ci-fixer.md', 'conflict-fixer.md', 'safety-review.md'].map((name) =>
       attempt(`prompt ${name} exists`, () => {
         if (!existsSync(path.join(PACKAGE_ROOT, 'prompts', name))) throw new Error('missing')
         return 'ok'
