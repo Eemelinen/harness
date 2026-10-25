@@ -14,7 +14,7 @@ this file to change on every branch; keep that heading text exactly.
   retros (docs/self-improvement.md). Merges that change a shipped path are released by
   `.github/workflows/release.yml` (docs/developing.md → Releasing); it needs the `RELEASE_TOKEN` secret.
 - Last verified: F-017 on this branch (merged with main after F-016), `pnpm check` green on 2026-10-25.
-- Highest-priority unfinished feature: none (F-000…F-017 passing).
+- Highest-priority unfinished feature: F-018 (keep the user's MCP servers out of loop sessions); F-000…F-017 passing.
 - Current blocker: none.
 
 ## Next Steps
@@ -38,8 +38,16 @@ this file to change on every branch; keep that heading text exactly.
 6. After F-017 is released, start long-running loops detached (docs/how-it-works.md → Stopping the
    loop: `setsid nohup pnpm harness:loop > loop.log 2>&1 &` or tmux). A loop that still ends with
    its launcher now leaves an `aborted` row with `stopped by <signal>` in `runs.jsonl`.
+7. Build F-018 (`pnpm harness:loop`). Until it is released, every driver-run session on this machine pays for the user-level `rea` MCP server's tool list (~340k tokens, about 3 USD per Opus session), and safety reviews end on their 2 USD budget without a verdict; idea-generator sets `review.maxBudgetUsd` to 6 as a stopgap.
 
 ## Session Log
+
+### Session 011 — 2026-10-25 (queue F-018, interactive)
+
+- Goal: find why safety reviews in the idea-generator loop end on their budget without a verdict.
+- Found: a user-level MCP server connects mid-session and adds an 824 KB tool list to the conversation (F-018 notes have the transcript and numbers).
+- Completed (this commit): F-018 queued. No code changed.
+- Next best step: F-018.
 
 ### Session 010 — 2026-10-25 (F-017 Windows CI, interactive)
 
