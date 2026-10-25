@@ -1169,7 +1169,7 @@ async function runFeature(
     })
     if (pr && review.length > 0) {
       // Not merged, so dependents stay unready; independent features go on.
-      notify(`${id} PR needs a human review before it merges (${review.join('; ')}): ${pr}`)
+      notify(holdNotice(id, review, pr))
       return 'done'
     }
     if (pr && (config.merge !== 'none' || opts.autoMerge) && opts.wait) {
@@ -1279,9 +1279,7 @@ function publish(
   }
   const body = [
     ...(intake ? [`Closes #${intake.issue} (harness retro).`, ''] : []),
-    ...(review.length > 0
-      ? ['> **Waits for a human review** — not auto-merged:', ...review.map((r) => `> - ${r}`), '']
-      : []),
+    ...holdBanner(review),
     ...(gate.notes.length > 0 ? [...gate.notes, ''] : []),
     `## ${id} — ${feature.title}`,
     '',
@@ -1336,7 +1334,7 @@ function publish(
 // Merge gate (src/review.ts)
 // ---------------------------------------------------------------------------------------
 
-interface Gate {
+export interface Gate {
   /** Why the PR waits for a human; empty when it may auto-merge. */
   hold: string[]
   /** PR body lines for a passed safety review. */
@@ -1392,7 +1390,19 @@ async function reviewGate(
       cost: 0,
     }
   }
-  const { verdict, missing, cost } = await runSafetyReview(id, feature, dir, reasons, files)
+  return safetyGate(reasons, await runSafetyReview(id, feature, dir, reasons, files))
+}
+
+/**
+ * The gate a safety review decides: `safe` passes with its reasons as PR notes; `unsafe` holds
+ * with its reasons, and a review without a verdict holds with why (`missing`: out of budget or
+ * no verdict).
+ */
+export function safetyGate(
+  reasons: string[],
+  review: { verdict?: SafetyVerdict; missing: string; cost: number },
+): Gate {
+  const { verdict, missing, cost } = review
   if (verdict?.verdict === 'safe')
     return {
       hold: [],
@@ -1408,6 +1418,17 @@ async function reviewGate(
     ? verdict.reasons.map((r) => `safety review: ${r}`)
     : [`safety review ${missing}`]
   return { hold: [...reasons, ...why], notes: [], cost }
+}
+
+/** The PR body's banner for a held PR; empty when nothing holds it. */
+export function holdBanner(hold: string[]): string[] {
+  if (hold.length === 0) return []
+  return ['> **Waits for a human review** — not auto-merged:', ...hold.map((r) => `> - ${r}`), '']
+}
+
+/** The NOTIFY line for a PR that waits for a human review. */
+export function holdNotice(id: string, hold: string[], pr: string): string {
+  return `${id} PR needs a human review before it merges (${hold.join('; ')}): ${pr}`
 }
 
 const MAX_REVIEW_DIFF = 60_000

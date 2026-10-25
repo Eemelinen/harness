@@ -44,6 +44,24 @@ this file to change on every branch; keep that heading text exactly.
 
 ## Session Log
 
+### Session 013 — 2026-10-25 (F-018 attempt 2, driver-run)
+
+- Goal: address the evaluator's Revise on attempt 1: evidence named the parent commit
+  (`working tree on c81bc25`) instead of the verified code, and no test showed the budget wording
+  reaching the NOTIFY line, the PR body or the retro error.
+- Completed: the safety-review gate (`safetyGate`), the held PR's body banner (`holdBanner`) and
+  NOTIFY line (`holdNotice`) in `src/loop.ts`, and the retro's analysis check (`retroAnalysis` in
+  `src/retro.ts`) are now exported pure functions. Tests check that a budget-exhausted safety review
+  holds the PR with "safety review ran out of budget (3.05 of 2 USD)" in both the NOTIFY line and
+  the PR body, that safe and unsafe verdicts still gate as before, and that a budget-exhausted retro
+  throws "retro session ran out of budget (4.20 of 3 USD)". No behaviour change.
+- Evidence: removed the stale `working tree on c81bc25` line from F-018's `evidence` by hand (no
+  CLI command edits evidence, and `harness verify` only appends), then ran `pnpm harness:verify
+F-018` on a clean tree after committing the code, so the line names the verified commit.
+- Not done: the CI and conflict fixers still have no test of their own; they share `sessionArgs`
+  with the generator, which the MCP tests cover (evaluator: acceptable).
+- Next best step: Next Steps 7 after the release.
+
 ### Session 012 — 2026-10-25 (F-018, driver-run)
 
 - Goal: keep the user's MCP servers out of driver-started sessions and name a budget-exhausted verdict session.

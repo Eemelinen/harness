@@ -807,6 +807,17 @@ export function retroArgs(config: HarnessConfig, prompt: string, root: string): 
   ]
 }
 
+/** The retro session's analysis; throws why there is none (out of budget, or invalid output). */
+export function retroAnalysis(result: Json, budgetUsd: number): Analysis {
+  const parsed = analysisSchema.safeParse(result.structured_output)
+  if (parsed.success) return parsed.data
+  throw new Error(
+    result.subtype === 'error_max_budget_usd'
+      ? `retro session ${noVerdictReason(result, budgetUsd)}`
+      : `retro session returned no valid analysis: ${z.prettifyError(parsed.error)}`,
+  )
+}
+
 export function runRetro(project: Project, options: RetroOptions = {}): RetroResult {
   const log = options.log ?? ((line: string) => console.log(line))
   const { config, root } = project
@@ -861,14 +872,7 @@ export function runRetro(project: Project, options: RetroOptions = {}): RetroRes
     )
   }
   const costUsd = Number(result.total_cost_usd ?? 0)
-  const parsed = analysisSchema.safeParse(result.structured_output)
-  if (!parsed.success)
-    throw new Error(
-      result.subtype === 'error_max_budget_usd'
-        ? `retro session ${noVerdictReason(result, config.retro.maxBudgetUsd)}`
-        : `retro session returned no valid analysis: ${z.prettifyError(parsed.error)}`,
-    )
-  const analysis = parsed.data
+  const analysis = retroAnalysis(result, config.retro.maxBudgetUsd)
   log(
     `retro: ${analysis.findings.length} finding(s), $${costUsd.toFixed(2)} — ${oneLine(analysis.summary, 200)}`,
   )

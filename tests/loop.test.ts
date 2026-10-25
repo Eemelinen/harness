@@ -11,6 +11,8 @@ import {
   abortedRecord,
   asideBranch,
   evaluatorArgs,
+  holdBanner,
+  holdNotice,
   listenForStop,
   loopExit,
   mergeResult,
@@ -22,6 +24,7 @@ import {
   restartRefusal,
   retryFeature,
   runRecorder,
+  safetyGate,
   safetyReviewArgs,
   sessionArgs,
   signalExitCode,
@@ -34,7 +37,7 @@ import {
   type RunRecord,
   type Signalable,
 } from '../src/loop'
-import { retroArgs } from '../src/retro'
+import { retroAnalysis, retroArgs } from '../src/retro'
 import { mcpArgs, noVerdictReason } from '../src/run'
 
 function dir(name: string, pkg: object) {
@@ -640,6 +643,45 @@ describe('noVerdictReason', () => {
     }
     expect(`safety review ${noVerdictReason(result, 2)}`).toBe(
       'safety review ran out of budget (3.05 of 2 USD)',
+    )
+  })
+
+  it('holds a PR whose safety review ran out of budget with that wording in NOTIFY and the PR body', () => {
+    const result = { subtype: 'error_max_budget_usd', total_cost_usd: 3.0528213 }
+    const missing = noVerdictReason(result, 2)
+    const gate = safetyGate(['changes a review path: src/loop.ts'], { missing, cost: 3.05 })
+    const why = 'safety review ran out of budget (3.05 of 2 USD)'
+    expect(gate.hold).toEqual(['changes a review path: src/loop.ts', why])
+    expect(holdNotice('F-042', gate.hold, 'https://example.test/pr/1')).toBe(
+      `F-042 PR needs a human review before it merges (changes a review path: src/loop.ts; ${why}): https://example.test/pr/1`,
+    )
+    expect(holdBanner(gate.hold)).toContain(`> - ${why}`)
+    expect(holdBanner(gate.hold).join('\n')).not.toContain('gave no verdict')
+  })
+
+  it('passes a safe safety review and holds an unsafe one with its reasons', () => {
+    const safe = safetyGate(['r'], {
+      verdict: { verdict: 'safe', reasons: ['only a prompt sentence'] },
+      missing: 'gave no verdict',
+      cost: 0.2,
+    })
+    expect(safe.hold).toEqual([])
+    expect(holdBanner(safe.hold)).toEqual([])
+    expect(safe.notes).toContain('- only a prompt sentence')
+    const unsafe = safetyGate(['r'], {
+      verdict: { verdict: 'unsafe', reasons: ['loosens the guard'] },
+      missing: 'gave no verdict',
+      cost: 0.2,
+    })
+    expect(unsafe.hold).toEqual(['r', 'safety review: loosens the guard'])
+  })
+
+  it('names a retro session that ran out of budget in its error', () => {
+    expect(() =>
+      retroAnalysis({ subtype: 'error_max_budget_usd', total_cost_usd: 4.2 }, 3),
+    ).toThrow('retro session ran out of budget (4.20 of 3 USD)')
+    expect(() => retroAnalysis({ subtype: 'success' }, 3)).toThrow(
+      'retro session returned no valid analysis',
     )
   })
 
