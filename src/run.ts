@@ -1,5 +1,5 @@
 /** Process helpers shared by the commands. */
-import { spawn, spawnSync, type SpawnSyncReturns } from 'node:child_process'
+import { spawn, spawnSync, type ChildProcess, type SpawnSyncReturns } from 'node:child_process'
 import { createWriteStream, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -57,13 +57,14 @@ export function sh(
 
 /**
  * Runs a process with its output both on this terminal and in `logFile`, so a crash's error lines
- * are kept for the evidence. Resolves once the process exited and the log is flushed.
+ * are kept for the evidence. Resolves once the process exited and the log is flushed. `onSpawn`
+ * gets the process, so the caller can pass a stop signal on to it.
  */
 export function spawnTee(
   command: string,
   args: string[],
   logFile: string,
-  opts: { cwd: string; env?: NodeJS.ProcessEnv },
+  opts: { cwd: string; env?: NodeJS.ProcessEnv; onSpawn?: (child: ChildProcess) => void },
 ): Promise<{ code: number; signal: NodeJS.Signals | null }> {
   mkdirSync(path.dirname(logFile), { recursive: true })
   const log = createWriteStream(logFile)
@@ -73,6 +74,7 @@ export function spawnTee(
       env: opts.env ?? process.env,
       stdio: ['inherit', 'pipe', 'pipe'],
     })
+    opts.onSpawn?.(child)
     child.stdout.on('data', (chunk: Buffer) => {
       process.stdout.write(chunk)
       log.write(chunk)

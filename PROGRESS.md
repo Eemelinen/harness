@@ -13,8 +13,8 @@ this file to change on every branch; keep that heading text exactly.
 - The repository runs its own loop: features come from `harness-retro` issues filed by project
   retros (docs/self-improvement.md). Merges that change a shipped path are released by
   `.github/workflows/release.yml` (docs/developing.md → Releasing); it needs the `RELEASE_TOKEN` secret.
-- Last verified: F-016 on this branch, `pnpm check` green on 2026-10-24.
-- Highest-priority unfinished feature: none (F-000…F-016 passing).
+- Last verified: F-017 on this branch (merged with main after F-016), `pnpm check` green on 2026-10-25.
+- Highest-priority unfinished feature: none (F-000…F-017 passing).
 - Current blocker: none.
 
 ## Next Steps
@@ -35,8 +35,72 @@ this file to change on every branch; keep that heading text exactly.
    session can fix the `down` order of a migration it generated (harness#20).
 5. After F-016 is released, watch the first loop PR that conflicts with the default branch: the log
    should show `merging origin/main into feat/F-NNN` instead of a 20-minute stall (harness#21).
+6. After F-017 is released, start long-running loops detached (docs/how-it-works.md → Stopping the
+   loop: `setsid nohup pnpm harness:loop > loop.log 2>&1 &` or tmux). A loop that still ends with
+   its launcher now leaves an `aborted` row with `stopped by <signal>` in `runs.jsonl`.
 
 ## Session Log
+
+### Session 010 — 2026-10-25 (F-017 Windows CI, interactive)
+
+- PR #26 failed CI on Windows only, in three `tests/loop.test.ts` tests that send a real SIGTERM or
+  SIGHUP to a child process. Windows has no catchable SIGTERM or SIGHUP: `process.kill` ends the
+  process at once, so the handler never runs.
+- Those three tests now run only off Windows (`it.runIf(process.platform !== 'win32')`, as in
+  `tests/run.test.ts`). The stopHandler, listenForStop, runRecorder and loopExit unit tests still
+  run everywhere. `docs/how-it-works.md` → Stopping the loop says what stops the driver on Windows:
+  Ctrl-C and closing the console window, but not `taskkill`.
+- Verification: `pnpm harness:verify F-017` (`pnpm check`); Windows through CI on the PR.
+
+### Session 009 — 2026-10-24 (F-017 attempt 2, driver-run)
+
+- The evaluator returned Revise on attempt 1: the `aborted` row and the notify-and-exit path were
+  untested glue, a stop during the update step still spawned a restarted driver that never got
+  the signal, and an error thrown while stopping left no row. All four are addressed:
+  - The stop bookkeeping moved into exported functions the loop uses as-is. `listenForStop` registers
+    SIGINT/SIGTERM/SIGHUP and holds the stop state (it replaces `aborting`/`stopSignal`).
+    `runRecorder` remembers the open attempt and writes its `aborted` row (`abortedRecord`,
+    `stopNote`). `loopExit` notifies and returns 128 + n, and `restartRefusal` guards a restart.
+  - A stop records the attempt wherever it lands: after a session, in an error thrown while
+    stopping (choice: write the row when the attempt has none yet), and now also on a second
+    signal (cost 0). That replaces session 008's "second signal writes no row". An attempt's own
+    row closes it, so the merge wait after a `pr` row adds none; a stop between features records
+    nothing.
+  - Both restarts (after an update and for a rollback re-test) are skipped once a stop arrived;
+    the check sits right before the spawn, with no await in between. A throw from the update
+    step during a stop now ends the loop through the stop path instead of crashing it. The pins
+    stay moved, so the next run starts on the new version without its probation (documented).
+- Ctrl-C exits 130 instead of 0 (since attempt 1): mention it in the PR, since wrapper scripts
+  that check `$?` see it. No flag or config key changed, so it is not marked breaking.
+- Tests: each new function, plus a real process that gets SIGTERM/SIGHUP through `listenForStop`
+  and exits 143/129 after logging and notifying. A mutation check (registering SIGINT only) fails
+  5 of them. Verification: `pnpm harness:verify F-017` on b5d1ffa.
+
+### Session 008 — 2026-10-24 (F-017, driver-run)
+
+- F-017 (retro issue #22): SIGINT, SIGTERM and SIGHUP share one handler, `stopHandler` in
+  `src/loop.ts`. The first signal logs `<signal>: stopping`, sends the session SIGINT (SIGTERM
+  after 30 s, as on wall-clock expiry) and the same signal to a restarted driver (`spawnTee` got
+  an `onSpawn` option for that). The attempt is recorded `aborted` with `stopped by <signal>`,
+  the loop notifies (`stopNotice`) and exits 128 + the signal number. A second signal ends the
+  session and exits at once. Implemented as proposed, with these choices:
+  - SIGINT changed too, for consistency: Ctrl-C now exits 130 instead of 0, notifies and escalates
+    to SIGTERM after 30 s. Not marked breaking: no flag or config key changed.
+  - A repeat within 2 s counts as the same signal. A terminal signals the whole process group
+    and pnpm forwards the signal again, so without the window one Ctrl-C could exit at once.
+  - The stop is checked after the evaluator and the safety review as well. Before this, a SIGINT
+    during the evaluator gave no verdict, so the next attempt started. An error thrown while
+    stopping (the merge wait) ends the loop through the stop path instead of crashing.
+  - A second signal exits without a `runs.jsonl` row (the handler doesn't know the attempt;
+    changed in session 009: it now writes the row).
+  - Docs: the interrupted feature's branch stays, so a restarted loop skips it.
+    `--feature F-NNN` continues it in the same worktree. A retro-intake feature exists only on
+    its branch and has to be finished by hand.
+- Tests: the handler with stub children and fake timers (each signal, the grace, a repeat inside
+  the window, a second signal, passing the signal to a restarted driver), one real process that
+  ignores SIGINT, `signalExitCode`, `stopNotice`, and `spawnTee`'s `onSpawn`. Verification:
+  `pnpm harness:verify F-017`.
+- This changes the loop, so the PR waits for a human (reviewPaths).
 
 ### Session 007 — 2026-10-25 (F-016 Windows CI, interactive)
 
