@@ -14,7 +14,8 @@ It ships two ways, always used together and pinned to the same tag:
 
 Driver-run sessions do not depend on the marketplace: the loop passes `--plugin-dir` pointing at the
 plugin inside the installed package, so unattended sessions always run the plugin version that
-matches the package. `pnpm harness:doctor` fails when the two pins differ.
+matches the package. `pnpm harness:doctor` fails when the two pins differ. They also load only the
+project's own MCP servers (`.mcp.json`, through `--strict-mcp-config`), never the user's.
 
 ## What lives where
 

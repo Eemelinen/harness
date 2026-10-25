@@ -13,8 +13,8 @@ this file to change on every branch; keep that heading text exactly.
 - The repository runs its own loop: features come from `harness-retro` issues filed by project
   retros (docs/self-improvement.md). Merges that change a shipped path are released by
   `.github/workflows/release.yml` (docs/developing.md → Releasing); it needs the `RELEASE_TOKEN` secret.
-- Last verified: F-017 on this branch (merged with main after F-016), `pnpm check` green on 2026-10-25.
-- Highest-priority unfinished feature: F-018 (keep the user's MCP servers out of loop sessions); F-000…F-017 passing.
+- Last verified: F-018 on this branch, `pnpm check` green on 2026-10-25.
+- Highest-priority unfinished feature: none; F-000…F-018 passing.
 - Current blocker: none.
 
 ## Next Steps
@@ -38,9 +38,33 @@ this file to change on every branch; keep that heading text exactly.
 6. After F-017 is released, start long-running loops detached (docs/how-it-works.md → Stopping the
    loop: `setsid nohup pnpm harness:loop > loop.log 2>&1 &` or tmux). A loop that still ends with
    its launcher now leaves an `aborted` row with `stopped by <signal>` in `runs.jsonl`.
-7. Build F-018 (`pnpm harness:loop`). Until it is released, every driver-run session on this machine pays for the user-level `rea` MCP server's tool list (~340k tokens, about 3 USD per Opus session), and safety reviews end on their 2 USD budget without a verdict; idea-generator sets `review.maxBudgetUsd` to 6 as a stopgap.
+7. After F-018 is released, check the first safety review and evaluator in idea-generator: the
+   trace's `usage.cache_creation_input_tokens` should be tens of thousands, not ~380k, and the cost
+   well under 1 USD. Then idea-generator can drop its `review.maxBudgetUsd: 6` stopgap.
 
 ## Session Log
+
+### Session 012 — 2026-10-25 (F-018, driver-run)
+
+- Goal: keep the user's MCP servers out of driver-started sessions and name a budget-exhausted verdict session.
+- Completed: every session the driver starts (generator, CI and conflict fixers through
+  `sessionArgs`, evaluator `evaluatorArgs`, safety review `safetyReviewArgs`, retro `retroArgs`)
+  gets `mcpArgs(dir)` from `src/run.ts`: `--strict-mcp-config`, plus `--mcp-config <dir>/.mcp.json`
+  when the project has one. The model probe before the loop gets `--strict-mcp-config` alone (it
+  runs in the temp directory). The argument builders are now exported pure functions, so the tests
+  check each session kind with and without `.mcp.json`. `--allowedTools` stays last because it is
+  variadic.
+- A verdict session that ends with `error_max_budget_usd` is reported by `noVerdictReason` as "ran
+  out of budget (3.05 of 2 USD)": the safety review's hold reason (NOTIFY line and PR body), the
+  evaluator's log line, attempt note, run note and retry context, and the retro's error.
+- Budget default: kept `review.maxBudgetUsd` at 2. The idea-generator safety reviews without the
+  MCP load (F-008, F-018, F-029, F-033, F-037; 3–9 turns) cost 0.12–0.58 USD, so 2 leaves about
+  3× headroom; docs/config.md says so.
+- Not done: F-042's lost verdict cannot be recovered, because a budget-exhausted result carries no
+  `structured_output` (checked in its trace); with the MCP load gone the review should not reach the
+  budget.
+- Verification: `pnpm harness:verify F-018` → L1 pass.
+- Next best step: Next Steps 7 after the release.
 
 ### Session 011 — 2026-10-25 (queue F-018, interactive)
 

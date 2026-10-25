@@ -1,6 +1,6 @@
 /** Process helpers shared by the commands. */
 import { spawn, spawnSync, type ChildProcess, type SpawnSyncReturns } from 'node:child_process'
-import { createWriteStream, mkdirSync } from 'node:fs'
+import { createWriteStream, existsSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -114,6 +114,31 @@ export function sessionEnv(
   env.GH_PROMPT_DISABLED = '1'
   env.GIT_TERMINAL_PROMPT = '0'
   return env
+}
+
+/**
+ * The MCP flags of every driver-started Claude session: only the project's own servers
+ * (`.mcp.json` in `dir`) load, never the user's. A user-level server with a large tool list
+ * connects mid-session and adds its whole list to the conversation, hundreds of thousands of
+ * tokens in every session (harness F-018).
+ */
+export function mcpArgs(dir: string): string[] {
+  const file = path.join(dir, '.mcp.json')
+  return ['--strict-mcp-config', ...(existsSync(file) ? ['--mcp-config', file] : [])]
+}
+
+/**
+ * Why a session that should have returned a verdict (evaluator, safety review, retro) did not,
+ * from its JSON result: "ran out of budget (3.05 of 2 USD)" when it hit `--max-budget-usd`, so
+ * the reader knows nothing was found, otherwise "gave no verdict".
+ */
+export function noVerdictReason(
+  result: Record<string, unknown> | undefined,
+  budgetUsd: number,
+): string {
+  if (result?.subtype === 'error_max_budget_usd')
+    return `ran out of budget (${Number(result.total_cost_usd ?? 0).toFixed(2)} of ${budgetUsd} USD)`
+  return 'gave no verdict'
 }
 
 /** Run a configured command line (`docker info`, `pnpm db:up`) through the platform shell. */
