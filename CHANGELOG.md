@@ -4,6 +4,10 @@ Releases are git tags (`vX.Y.Z`). Projects pin the package and the plugin market
 tag; see [docs/developing.md](docs/developing.md). From v0.3.1 on, the release workflow writes each
 entry from the commit subjects since the previous tag.
 
+## v0.3.9 — 2026-10-25
+
+- Handle SIGTERM and SIGHUP in the loop driver like SIGINT (#26)
+
 ## v0.3.8 — 2026-10-25
 
 - Resolve a loop PR's conflict with the default branch instead of waiting for CI (#25)
