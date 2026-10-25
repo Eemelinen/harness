@@ -171,6 +171,10 @@ pkill -TERM -f 'harness.mjs loop'                  # stop it later
 
 SIGTERM to the driver is enough: it passes the stop on to its session and to a restarted driver.
 
+On Windows only Ctrl-C and closing the console window reach the driver as a stop (Node reports the
+closed window as SIGHUP, and Windows ends the process about 10 s later). Windows has no SIGTERM a
+process can handle: `taskkill` or `process.kill` ends the driver at once, with no `aborted` row.
+
 **Staying on the newest harness (rollout safety).** With `update.auto`, the loop moves to new
 harness releases on its own before it starts a feature. One project, the canary, tests each
 release first, so a bad release is caught there and kept away from the others:

@@ -39,6 +39,17 @@ this file to change on every branch; keep that heading text exactly.
 
 ## Session Log
 
+### Session 007 — 2026-10-25 (F-017 Windows CI, interactive)
+
+- PR #26 failed CI on Windows only, in three `tests/loop.test.ts` tests that send a real SIGTERM or
+  SIGHUP to a child process. Windows has no catchable SIGTERM or SIGHUP: `process.kill` ends the
+  process at once, so the handler never runs.
+- Those three tests now run only off Windows (`it.runIf(process.platform !== 'win32')`, as in
+  `tests/run.test.ts`). The stopHandler, listenForStop, runRecorder and loopExit unit tests still
+  run everywhere. `docs/how-it-works.md` → Stopping the loop says what stops the driver on Windows:
+  Ctrl-C and closing the console window, but not `taskkill`.
+- Verification: `pnpm harness:verify F-017` (`pnpm check`); Windows through CI on the PR.
+
 ### Session 006 — 2026-10-24 (F-017 attempt 2, driver-run)
 
 - The evaluator returned Revise on attempt 1: the `aborted` row and the notify-and-exit path were

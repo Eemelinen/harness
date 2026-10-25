@@ -333,20 +333,24 @@ describe('stopHandler', () => {
     expect(session.sent).toEqual(['SIGINT'])
   })
 
-  it('escalates to SIGTERM on a real process that ignores SIGINT', async () => {
-    const proc = spawn(
-      process.execPath,
-      ['-e', "process.on('SIGINT', () => {}); console.log('ready'); setInterval(() => {}, 1000)"],
-      { stdio: ['ignore', 'pipe', 'ignore'] },
-    )
-    await new Promise((resolve) => proc.stdout.once('data', resolve))
-    const exited = new Promise<NodeJS.Signals | null>((resolve) =>
-      proc.on('exit', (_code, signal) => resolve(signal)),
-    )
-    const { handle } = setup({ session: proc })
-    handle('SIGTERM')
-    expect(await exited).toBe('SIGTERM')
-  })
+  // Windows has no catchable SIGTERM or SIGHUP: process.kill ends the process at once.
+  it.runIf(process.platform !== 'win32')(
+    'escalates to SIGTERM on a real process that ignores SIGINT',
+    async () => {
+      const proc = spawn(
+        process.execPath,
+        ['-e', "process.on('SIGINT', () => {}); console.log('ready'); setInterval(() => {}, 1000)"],
+        { stdio: ['ignore', 'pipe', 'ignore'] },
+      )
+      await new Promise((resolve) => proc.stdout.once('data', resolve))
+      const exited = new Promise<NodeJS.Signals | null>((resolve) =>
+        proc.on('exit', (_code, signal) => resolve(signal)),
+      )
+      const { handle } = setup({ session: proc })
+      handle('SIGTERM')
+      expect(await exited).toBe('SIGTERM')
+    },
+  )
 })
 
 describe('signalExitCode', () => {
@@ -393,9 +397,12 @@ describe('listenForStop', () => {
     ['SIGTERM', 143],
     ['SIGHUP', 129],
   ] as const)
-    it(`a real process stopped by ${signal} logs it, notifies and exits ${code}`, async () => {
-      // The loop's own wiring: listenForStop on the process, then loopExit once the step ended.
-      const script = `
+    // Windows has no catchable SIGTERM or SIGHUP: process.kill ends the process at once.
+    it.runIf(process.platform !== 'win32')(
+      `a real process stopped by ${signal} logs it, notifies and exits ${code}`,
+      async () => {
+        // The loop's own wiring: listenForStop on the process, then loopExit once the step ended.
+        const script = `
         import { listenForStop, loopExit } from ${JSON.stringify(path.resolve('src/loop.ts'))}
         const stop = listenForStop(process, {
           log: (l) => console.log('log: ' + l),
@@ -413,24 +420,27 @@ describe('listenForStop', () => {
             log: (l) => console.log('log: ' + l),
           })
         }, 20)`
-      const proc = spawn(
-        process.execPath,
-        ['--import', 'tsx', '--input-type=module', '-e', script],
-        {
-          stdio: ['ignore', 'pipe', 'inherit'],
-        },
-      )
-      let out = ''
-      proc.stdout.on('data', (chunk: Buffer) => (out += chunk.toString()))
-      await new Promise<void>((resolve) =>
-        proc.stdout.on('data', () => out.includes('ready') && resolve()),
-      )
-      const exited = new Promise<number | null>((resolve) => proc.on('exit', (c) => resolve(c)))
-      proc.kill(signal)
-      expect(await exited).toBe(code)
-      expect(out).toContain(`log: ${signal}: stopping after the current step`)
-      expect(out).toContain(`notify: loop stopped by ${signal} during F-032 (recorded as aborted)`)
-    })
+        const proc = spawn(
+          process.execPath,
+          ['--import', 'tsx', '--input-type=module', '-e', script],
+          {
+            stdio: ['ignore', 'pipe', 'inherit'],
+          },
+        )
+        let out = ''
+        proc.stdout.on('data', (chunk: Buffer) => (out += chunk.toString()))
+        await new Promise<void>((resolve) =>
+          proc.stdout.on('data', () => out.includes('ready') && resolve()),
+        )
+        const exited = new Promise<number | null>((resolve) => proc.on('exit', (c) => resolve(c)))
+        proc.kill(signal)
+        expect(await exited).toBe(code)
+        expect(out).toContain(`log: ${signal}: stopping after the current step`)
+        expect(out).toContain(
+          `notify: loop stopped by ${signal} during F-032 (recorded as aborted)`,
+        )
+      },
+    )
 })
 
 describe('runRecorder', () => {
