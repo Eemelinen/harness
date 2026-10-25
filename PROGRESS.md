@@ -38,6 +38,17 @@ this file to change on every branch; keep that heading text exactly.
 
 ## Session Log
 
+### Session 007 — 2026-10-25 (F-016 Windows CI, interactive)
+
+- PR #25 failed CI on Windows only. The six tests in `tests/conflict.test.ts` that faked `gh` with a
+  `#!/bin/sh` script on PATH could not run it: spawnSync starts no shell script on Windows. Four
+  timed out, and `handBack` and `pinPrFailed` saw `gh` fail.
+- The two "gh stubbed" blocks now answer `gh` (and `claude`) through a `vi.mock` of `sh` in
+  `src/run`, as `tests/retro-intake.test.ts` does. Every other command still runs for real, so the
+  git repositories in these tests are unchanged. A `spawn` wrapper records started commands, so the
+  pin-PR test still checks that no `claude` session began. Same assertions as before.
+- Verification: `pnpm harness:verify F-016` (`pnpm check`); Windows through CI on the PR.
+
 ### Session 006 — 2026-10-24 (F-016 attempt 2, driver-run)
 
 - The evaluator's Revise on attempt 1: the shepherdPr conflict path, pinPr's conflict outcome and

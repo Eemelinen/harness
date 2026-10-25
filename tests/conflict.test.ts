@@ -1,5 +1,5 @@
-import { execFileSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { execFileSync, spawnSync } from 'node:child_process'
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -16,6 +16,36 @@ import {
   type BaseMergeSpec,
 } from '../src/conflict'
 import { handBack, pinPrFailed, render, waitForMerge } from '../src/loop'
+import type * as Run from '../src/run'
+
+/**
+ * The "gh stubbed" blocks answer `gh` (and `claude`) through a mock of `sh`; every other command
+ * runs for real. A mock rather than a script on PATH, because on Windows spawnSync runs no shell
+ * script. `spawned` records the commands `spawn` starts, so a test can check no session began.
+ */
+const fake = vi.hoisted(() => ({
+  sh: undefined as
+    undefined | ((command: string, args: string[], cwd: string) => Run.ShResult | undefined),
+  spawned: [] as string[],
+}))
+vi.mock('../src/run', async (original) => {
+  const real = await original<typeof Run>()
+  return {
+    ...real,
+    sh: (command: string, args: string[], opts: Parameters<typeof real.sh>[2]) =>
+      fake.sh?.(command, args, opts.cwd) ?? real.sh(command, args, opts),
+  }
+})
+vi.mock('node:child_process', async (original) => {
+  const real = await original<typeof import('node:child_process')>()
+  return {
+    ...real,
+    spawn: ((command: string, ...rest: unknown[]) => {
+      fake.spawned.push(command)
+      return (real.spawn as (...a: unknown[]) => unknown)(command, ...rest)
+    }) as typeof real.spawn,
+  }
+})
 
 const git = (cwd: string, ...args: string[]) =>
   execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
@@ -155,43 +185,33 @@ describe('mergeDefaultBranch', () => {
 })
 
 describe('waitForMerge with gh stubbed', () => {
-  let stub: string
-  const savedPath = process.env.PATH
-  const savedStub = process.env.GH_STUB
+  let views: Record<string, object>
+  let viewCalls: number
 
-  /** `gh pr view` answers view-<n>.json on the n-th call, then view.json; `gh pr checks` has none. */
+  /** `gh pr view` answers view-<n> on the n-th call, then view; `gh pr checks` has none. */
   beforeEach(() => {
-    stub = mkdtempSync(path.join(tmpdir(), 'harness-gh-'))
-    const bin = path.join(stub, 'bin')
-    mkdirSync(bin)
-    writeFileSync(
-      path.join(bin, 'gh'),
-      [
-        '#!/bin/sh',
-        'if [ "$2" = "checks" ]; then echo "[]"; exit 0; fi',
-        'n=$(cat "$GH_STUB/n" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$GH_STUB/n"',
-        'f="$GH_STUB/view-$n.json"; [ -f "$f" ] || f="$GH_STUB/view.json"; cat "$f"',
-        '',
-      ].join('\n'),
-    )
-    chmodSync(path.join(bin, 'gh'), 0o755)
-    process.env.PATH = `${bin}${path.delimiter}${savedPath}`
-    process.env.GH_STUB = stub
+    views = {}
+    viewCalls = 0
+    fake.sh = (command, args) => {
+      if (command !== 'gh') return undefined
+      if (args[1] === 'checks') return { code: 0, out: '[]', err: '' }
+      viewCalls++
+      return { code: 0, out: JSON.stringify(views[`view-${viewCalls}`] ?? views.view), err: '' }
+    }
     vi.useFakeTimers()
     vi.spyOn(console, 'log').mockImplementation(() => {})
   })
 
   afterEach(() => {
+    fake.sh = undefined
     vi.useRealTimers()
     vi.restoreAllMocks()
-    process.env.PATH = savedPath
-    if (savedStub === undefined) delete process.env.GH_STUB
-    else process.env.GH_STUB = savedStub
   })
 
-  const view = (name: string, info: object) =>
-    writeFileSync(path.join(stub, `${name}.json`), JSON.stringify({ state: 'OPEN', ...info }))
-  const calls = () => Number(readFileSync(path.join(stub, 'n'), 'utf8'))
+  const view = (name: string, info: object) => {
+    views[name] = { state: 'OPEN', ...info }
+  }
+  const calls = () => viewCalls
 
   it('returns conflict at once when GitHub reports CONFLICTING', async () => {
     view('view', { mergeable: 'CONFLICTING', headRefOid: 'abc' })
@@ -354,47 +374,37 @@ describe('the shepherdPr conflict path', () => {
 })
 
 describe('giving up and pin PRs with gh stubbed', () => {
-  let stub: string
-  const savedPath = process.env.PATH
-  const savedStub = process.env.GH_STUB
+  let recorded: string[]
+  let ghExit: number
 
   /**
-   * `gh` and `claude` append their arguments to calls.txt, `gh` with "merging" or "clean" for the
-   * state of the worktree it runs in; `gh` exits with the code in gh-exit (0 by default).
+   * `gh` and `claude` record their arguments, `gh` with "merging" or "clean" for the state of the
+   * worktree it runs in; `gh` exits with ghExit (0 by default).
    */
   beforeEach(() => {
-    stub = mkdtempSync(path.join(tmpdir(), 'harness-gh-'))
-    const bin = path.join(stub, 'bin')
-    mkdirSync(bin)
-    writeFileSync(
-      path.join(bin, 'gh'),
-      [
-        '#!/bin/sh',
-        'if git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then s=merging; else s=clean; fi',
-        'echo "gh $* ($s)" >> "$GH_STUB/calls.txt"',
-        'exit $(cat "$GH_STUB/gh-exit" 2>/dev/null || echo 0)',
-        '',
-      ].join('\n'),
-    )
-    writeFileSync(path.join(bin, 'claude'), '#!/bin/sh\necho "claude $*" >> "$GH_STUB/calls.txt"\n')
-    chmodSync(path.join(bin, 'gh'), 0o755)
-    chmodSync(path.join(bin, 'claude'), 0o755)
-    process.env.PATH = `${bin}${path.delimiter}${savedPath}`
-    process.env.GH_STUB = stub
+    recorded = []
+    ghExit = 0
+    fake.spawned = []
+    fake.sh = (command, args, cwd) => {
+      if (command === 'claude') {
+        recorded.push(`claude ${args.join(' ')}`)
+        return { code: 0, out: '', err: '' }
+      }
+      if (command !== 'gh') return undefined
+      const merging =
+        spawnSync('git', ['rev-parse', '-q', '--verify', 'MERGE_HEAD'], { cwd }).status === 0
+      recorded.push(`gh ${args.join(' ')} (${merging ? 'merging' : 'clean'})`)
+      return { code: ghExit, out: '', err: ghExit === 0 ? '' : 'gh failed' }
+    }
     vi.spyOn(console, 'log').mockImplementation(() => {})
   })
 
   afterEach(() => {
+    fake.sh = undefined
     vi.restoreAllMocks()
-    process.env.PATH = savedPath
-    if (savedStub === undefined) delete process.env.GH_STUB
-    else process.env.GH_STUB = savedStub
   })
 
-  const calls = () =>
-    existsSync(path.join(stub, 'calls.txt'))
-      ? readFileSync(path.join(stub, 'calls.txt'), 'utf8').trim().split('\n')
-      : []
+  const calls = () => recorded
 
   /** A conflicting merge left in progress, on top of a local commit the remote does not have. */
   function unfinishedMerge() {
@@ -423,7 +433,7 @@ describe('giving up and pin PRs with gh stubbed', () => {
   it('pushes nothing while auto-merge could not be disabled', () => {
     const r = unfinishedMerge()
     const before = r.remoteHead('feat/F-001')
-    writeFileSync(path.join(stub, 'gh-exit'), '1')
+    ghExit = 1
     const hand = { pr: 'pr/7', dir: r.dir, remote: 'origin', branch: 'feat/F-001' }
     expect(handBack(hand)).toBe(false)
     expect(git(r.dir, 'status', '--porcelain')).toBe('')
@@ -436,5 +446,6 @@ describe('giving up and pin PRs with gh stubbed', () => {
     expect(pinPrFailed('pr/9', { state: 'stalled' }, 'main')).toBe('CI reported nothing for 20 min')
     expect(pinPrFailed('pr/9', { state: 'ci_failed', failed: [] }, 'main')).toBe('CI failed')
     expect(calls().filter((c) => c.startsWith('claude'))).toEqual([])
+    expect(fake.spawned).not.toContain('claude')
   })
 })
