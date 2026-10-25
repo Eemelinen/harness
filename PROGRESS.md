@@ -13,7 +13,7 @@ this file to change on every branch; keep that heading text exactly.
 - The repository runs its own loop: features come from `harness-retro` issues filed by project
   retros (docs/self-improvement.md). Merges that change a shipped path are released by
   `.github/workflows/release.yml` (docs/developing.md → Releasing); it needs the `RELEASE_TOKEN` secret.
-- Last verified: F-018 on this branch, `pnpm check` green on 2026-10-25.
+- Last verified: F-018 on this branch, `pnpm check` green on 2026-10-25 (commit 69453bf).
 - Highest-priority unfinished feature: none; F-000…F-018 passing.
 - Current blocker: none.
 
@@ -55,9 +55,11 @@ this file to change on every branch; keep that heading text exactly.
   holds the PR with "safety review ran out of budget (3.05 of 2 USD)" in both the NOTIFY line and
   the PR body, that safe and unsafe verdicts still gate as before, and that a budget-exhausted retro
   throws "retro session ran out of budget (4.20 of 3 USD)". No behaviour change.
-- Evidence: removed the stale `working tree on c81bc25` line from F-018's `evidence` by hand (no
-  CLI command edits evidence, and `harness verify` only appends), then ran `pnpm harness:verify
-F-018` on a clean tree after committing the code, so the line names the verified commit.
+- Evidence: committed the code (69453bf), ran `pnpm harness:verify F-018` on the clean tree (L1
+  pass), which added `pnpm check → pass (commit 69453bf)`, then removed the stale
+  `working tree on c81bc25` line by hand. No CLI command edits evidence, `harness verify` only
+  appends, and the guard refuses a commit while a `passing` feature has no evidence, so the old
+  line could only go after the new one.
 - Not done: the CI and conflict fixers still have no test of their own; they share `sessionArgs`
   with the generator, which the MCP tests cover (evaluator: acceptable).
 - Next best step: Next Steps 7 after the release.
