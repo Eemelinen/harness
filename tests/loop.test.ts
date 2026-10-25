@@ -1,14 +1,18 @@
 import { spawn } from 'node:child_process'
 import { EventEmitter } from 'node:events'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { parseConfig } from '../src/config'
 import {
   abortedRecord,
   asideBranch,
+  evaluatorArgs,
+  holdBanner,
+  holdNotice,
   listenForStop,
   loopExit,
   mergeResult,
@@ -20,6 +24,9 @@ import {
   restartRefusal,
   retryFeature,
   runRecorder,
+  safetyGate,
+  safetyReviewArgs,
+  sessionArgs,
   signalExitCode,
   STOP_SIGNALS,
   stopHandler,
@@ -30,6 +37,8 @@ import {
   type RunRecord,
   type Signalable,
 } from '../src/loop'
+import { retroAnalysis, retroArgs } from '../src/retro'
+import { mcpArgs, noVerdictReason } from '../src/run'
 
 function dir(name: string, pkg: object) {
   const root = mkdtempSync(path.join(tmpdir(), `harness-${name}-`))
@@ -578,5 +587,107 @@ describe('restartRefusal', () => {
       expect(restartRefusal(signal, '0.3.8')).toBe(
         `${signal}: not restarting on harness v0.3.8; the pins stay moved, so the next loop run starts on it`,
       )
+  })
+})
+
+describe('MCP servers of driver-started sessions', () => {
+  const config = parseConfig(
+    JSON.parse(readFileSync(path.resolve(import.meta.dirname, '../harness.config.json'), 'utf8')),
+  )
+  const plugin = path.resolve(import.meta.dirname, '../plugin')
+  const sessions = (cwd: string): [string, string[]][] => [
+    ['generator and fixers', sessionArgs(config, 'prompt', plugin, cwd)],
+    ['evaluator', evaluatorArgs(config, 'prompt', plugin, cwd)],
+    ['safety review', safetyReviewArgs(config, 'prompt', cwd)],
+    ['retro', retroArgs(config, 'prompt', cwd)],
+  ]
+
+  it('loads no MCP server in a project without .mcp.json', () => {
+    const cwd = mkdtempSync(path.join(tmpdir(), 'harness-mcp-'))
+    expect(mcpArgs(cwd)).toEqual(['--strict-mcp-config'])
+    for (const [kind, args] of sessions(cwd)) {
+      expect(args, kind).toContain('--strict-mcp-config')
+      expect(args, kind).not.toContain('--mcp-config')
+    }
+  })
+
+  it("loads only the project's own .mcp.json when it has one", () => {
+    const cwd = mkdtempSync(path.join(tmpdir(), 'harness-mcp-'))
+    const file = path.join(cwd, '.mcp.json')
+    writeFileSync(file, JSON.stringify({ mcpServers: {} }))
+    for (const [kind, args] of sessions(cwd)) {
+      expect(args, kind).toContain('--strict-mcp-config')
+      const at = args.indexOf('--mcp-config')
+      expect(args[at + 1], kind).toBe(file)
+    }
+  })
+
+  it('keeps the variadic --allowedTools last in a working session', () => {
+    const cwd = mkdtempSync(path.join(tmpdir(), 'harness-mcp-'))
+    writeFileSync(path.join(cwd, '.mcp.json'), '{}')
+    const args = sessionArgs({ ...config, allowedTools: ['Bash(pnpm *)'] }, 'p', plugin, cwd)
+    expect(args.slice(-2)).toEqual(['--allowedTools', 'Bash(pnpm *)'])
+  })
+})
+
+describe('noVerdictReason', () => {
+  it('names a session that ended on its budget, with the amount', () => {
+    // The shape of a safety review that crossed its budget (idea-generator F-042, harness 0.3.9).
+    const result = {
+      type: 'result',
+      subtype: 'error_max_budget_usd',
+      is_error: true,
+      num_turns: 3,
+      total_cost_usd: 3.0528213,
+      errors: ['Reached maximum budget ($2)'],
+    }
+    expect(`safety review ${noVerdictReason(result, 2)}`).toBe(
+      'safety review ran out of budget (3.05 of 2 USD)',
+    )
+  })
+
+  it('holds a PR whose safety review ran out of budget with that wording in NOTIFY and the PR body', () => {
+    const result = { subtype: 'error_max_budget_usd', total_cost_usd: 3.0528213 }
+    const missing = noVerdictReason(result, 2)
+    const gate = safetyGate(['changes a review path: src/loop.ts'], { missing, cost: 3.05 })
+    const why = 'safety review ran out of budget (3.05 of 2 USD)'
+    expect(gate.hold).toEqual(['changes a review path: src/loop.ts', why])
+    expect(holdNotice('F-042', gate.hold, 'https://example.test/pr/1')).toBe(
+      `F-042 PR needs a human review before it merges (changes a review path: src/loop.ts; ${why}): https://example.test/pr/1`,
+    )
+    expect(holdBanner(gate.hold)).toContain(`> - ${why}`)
+    expect(holdBanner(gate.hold).join('\n')).not.toContain('gave no verdict')
+  })
+
+  it('passes a safe safety review and holds an unsafe one with its reasons', () => {
+    const safe = safetyGate(['r'], {
+      verdict: { verdict: 'safe', reasons: ['only a prompt sentence'] },
+      missing: 'gave no verdict',
+      cost: 0.2,
+    })
+    expect(safe.hold).toEqual([])
+    expect(holdBanner(safe.hold)).toEqual([])
+    expect(safe.notes).toContain('- only a prompt sentence')
+    const unsafe = safetyGate(['r'], {
+      verdict: { verdict: 'unsafe', reasons: ['loosens the guard'] },
+      missing: 'gave no verdict',
+      cost: 0.2,
+    })
+    expect(unsafe.hold).toEqual(['r', 'safety review: loosens the guard'])
+  })
+
+  it('names a retro session that ran out of budget in its error', () => {
+    expect(() =>
+      retroAnalysis({ subtype: 'error_max_budget_usd', total_cost_usd: 4.2 }, 3),
+    ).toThrow('retro session ran out of budget (4.20 of 3 USD)')
+    expect(() => retroAnalysis({ subtype: 'success' }, 3)).toThrow(
+      'retro session returned no valid analysis',
+    )
+  })
+
+  it('keeps "gave no verdict" for any other session end', () => {
+    expect(noVerdictReason({ subtype: 'success', total_cost_usd: 0.2 }, 2)).toBe('gave no verdict')
+    expect(noVerdictReason({ subtype: 'error_max_turns' }, 2)).toBe('gave no verdict')
+    expect(noVerdictReason(undefined, 2)).toBe('gave no verdict')
   })
 })

@@ -28,7 +28,7 @@ import { z } from 'zod'
 
 import { loadProject, type HarnessConfig, type Project } from './config'
 import { FEATURE_ID, type Feature } from './feature-list'
-import { PACKAGE_ROOT, sessionEnv, sh } from './run'
+import { mcpArgs, noVerdictReason, PACKAGE_ROOT, sessionEnv, sh } from './run'
 
 // ---------------------------------------------------------------------------------------
 // Signals
@@ -780,6 +780,44 @@ export interface RetroOptions {
 }
 
 /** One retro: collect, analyse with a read-only session, file. Updates the retro state. */
+/** Arguments of the retro analysis session in `root`: read-only tools, the `retro` caps. */
+export function retroArgs(config: HarnessConfig, prompt: string, root: string): string[] {
+  const effort = config.retro.effort ?? config.evaluator.effort
+  return [
+    '-p',
+    prompt,
+    '--tools',
+    'Read,Glob,Grep',
+    '--permission-mode',
+    config.generator.permissionMode,
+    '--permission-prompts',
+    'none',
+    '--max-turns',
+    String(config.retro.maxTurns),
+    '--max-budget-usd',
+    String(config.retro.maxBudgetUsd),
+    '--model',
+    config.retro.model ?? config.evaluator.model,
+    ...(effort ? ['--effort', effort] : []),
+    '--output-format',
+    'json',
+    '--json-schema',
+    promptFile('retro-schema.json'),
+    ...mcpArgs(root),
+  ]
+}
+
+/** The retro session's analysis; throws why there is none (out of budget, or invalid output). */
+export function retroAnalysis(result: Json, budgetUsd: number): Analysis {
+  const parsed = analysisSchema.safeParse(result.structured_output)
+  if (parsed.success) return parsed.data
+  throw new Error(
+    result.subtype === 'error_max_budget_usd'
+      ? `retro session ${noVerdictReason(result, budgetUsd)}`
+      : `retro session returned no valid analysis: ${z.prettifyError(parsed.error)}`,
+  )
+}
+
 export function runRetro(project: Project, options: RetroOptions = {}): RetroResult {
   const log = options.log ?? ((line: string) => console.log(line))
   const { config, root } = project
@@ -810,28 +848,7 @@ export function runRetro(project: Project, options: RetroOptions = {}): RetroRes
     return vars[key] ?? ''
   })
   const model = config.retro.model ?? config.evaluator.model
-  const effort = config.retro.effort ?? config.evaluator.effort
-  const args = [
-    '-p',
-    prompt,
-    '--tools',
-    'Read,Glob,Grep',
-    '--permission-mode',
-    config.generator.permissionMode,
-    '--permission-prompts',
-    'none',
-    '--max-turns',
-    String(config.retro.maxTurns),
-    '--max-budget-usd',
-    String(config.retro.maxBudgetUsd),
-    '--model',
-    model,
-    ...(effort ? ['--effort', effort] : []),
-    '--output-format',
-    'json',
-    '--json-schema',
-    promptFile('retro-schema.json'),
-  ]
+  const args = retroArgs(config, prompt, root)
   const stamp = new Date().toISOString().replace(/[:.]/g, '-')
   const traceFile = project.resolve(config.traceDir, `retro-${stamp}.json`)
   log(
@@ -855,10 +872,7 @@ export function runRetro(project: Project, options: RetroOptions = {}): RetroRes
     )
   }
   const costUsd = Number(result.total_cost_usd ?? 0)
-  const parsed = analysisSchema.safeParse(result.structured_output)
-  if (!parsed.success)
-    throw new Error(`retro session returned no valid analysis: ${z.prettifyError(parsed.error)}`)
-  const analysis = parsed.data
+  const analysis = retroAnalysis(result, config.retro.maxBudgetUsd)
   log(
     `retro: ${analysis.findings.length} finding(s), $${costUsd.toFixed(2)} — ${oneLine(analysis.summary, 200)}`,
   )

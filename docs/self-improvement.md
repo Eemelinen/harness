@@ -87,7 +87,9 @@ What happens then depends on `review.mode`:
   (`prompts/safety-review.md`) reads the changes and answers one question: can unattended sessions
   now do something harmful they could not do before (destructive or outward-facing commands,
   weaker verification, exposed secrets)? `safe` → auto-merge, with the review in the PR body.
-  `unsafe` or no verdict → the PR waits for a human.
+  `unsafe` or no verdict → the PR waits for a human. A review that hit `review.maxBudgetUsd` says
+  so in the notification and the PR body ("safety review ran out of budget (3.05 of 2 USD)"):
+  nothing was found, the review just did not finish.
 - **`human`** (the harness repository): the PR always waits for a human.
 
 The gate uses the driver's own config, not the branch's, so a PR cannot loosen its own gate. A CI

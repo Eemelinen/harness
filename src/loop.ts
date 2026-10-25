@@ -15,7 +15,8 @@
  * Every session gets the harness plugin from the installed package through `--plugin-dir`, so
  * the guard, Stop hook and skills match the pinned package version and do not depend on the
  * folder being trusted. A session whose init event does not list the plugin is stopped at once:
- * an unattended session without the guard must not run.
+ * an unattended session without the guard must not run. Every session also runs with
+ * `--strict-mcp-config` (mcpArgs): only the project's `.mcp.json` servers load, never the user's.
  *
  * SIGINT, SIGTERM and SIGHUP stop the loop alike (listenForStop, stopHandler): the current
  * session gets SIGINT, the open attempt is recorded as `aborted` with the signal (runRecorder),
@@ -90,7 +91,15 @@ import {
   type IntakeItem,
 } from './retro'
 import { hardStops, parseSafetyVerdict, type SafetyVerdict, type Snapshot } from './review'
-import { PACKAGE_ROOT, sh as run, sessionEnv, shellLine, spawnTee } from './run'
+import {
+  mcpArgs,
+  noVerdictReason,
+  PACKAGE_ROOT,
+  sh as run,
+  sessionEnv,
+  shellLine,
+  spawnTee,
+} from './run'
 import { crashMessage, excerptLog, quarantine } from './quarantine'
 import {
   claim,
@@ -728,26 +737,20 @@ function verdictMarkdown(v: Verdict): string {
 }
 
 /**
- * One evaluator session: fresh context, read-only. `--agent` ignores `--json-schema`, so the
- * agent file's instructions and tool list are passed directly (see evaluatorAgent()).
+ * Arguments of an evaluator session in `dir`: fresh context, read-only. `--agent` ignores
+ * `--json-schema`, so the agent file's instructions and tool list are passed directly (see
+ * evaluatorAgent()).
  */
-async function runEvaluator(
-  id: string,
-  feature: Feature,
-  dir: string,
+export function evaluatorArgs(
+  cfg: HarnessConfig,
+  prompt: string,
   plugin: string,
-  context = '',
-): Promise<{ verdict?: Verdict; cost: number }> {
-  log(`=== ${id}: evaluator session (${config.evaluator.model})`)
+  dir: string,
+): string[] {
   const agent = evaluatorAgent(plugin)
-  const evalArgs = [
+  return [
     '-p',
-    render(promptFile('evaluator.md'), {
-      FEATURE_ID: id,
-      FEATURE_TITLE: feature.title,
-      BASE: `${remote()}/${defaultBranch()}`,
-      CONTEXT: context,
-    }),
+    prompt,
     '--plugin-dir',
     plugin,
     '--append-system-prompt',
@@ -755,33 +758,55 @@ async function runEvaluator(
     '--tools',
     agent.tools,
     '--permission-mode',
-    config.generator.permissionMode,
+    cfg.generator.permissionMode,
     '--permission-prompts',
     'none',
     '--max-turns',
-    String(config.evaluator.maxTurns),
+    String(cfg.evaluator.maxTurns),
     '--max-budget-usd',
-    String(config.evaluator.maxBudgetUsd),
+    String(cfg.evaluator.maxBudgetUsd),
     '--model',
-    config.evaluator.model,
-    ...(config.evaluator.effort ? ['--effort', config.evaluator.effort] : []),
+    cfg.evaluator.model,
+    ...(cfg.evaluator.effort ? ['--effort', cfg.evaluator.effort] : []),
     '--output-format',
     'json',
     '--json-schema',
     promptFile('evaluator-schema.json'),
+    ...mcpArgs(dir),
   ]
+}
+
+/**
+ * One evaluator session. Without a verdict, `missing` says why (noVerdictReason: out of budget,
+ * or no verdict).
+ */
+async function runEvaluator(
+  id: string,
+  feature: Feature,
+  dir: string,
+  plugin: string,
+  context = '',
+): Promise<{ verdict?: Verdict; missing: string; cost: number }> {
+  log(`=== ${id}: evaluator session (${config.evaluator.model})`)
+  const prompt = render(promptFile('evaluator.md'), {
+    FEATURE_ID: id,
+    FEATURE_TITLE: feature.title,
+    BASE: `${remote()}/${defaultBranch()}`,
+    CONTEXT: context,
+  })
   const ev = await runClaude({
     cwd: dir,
-    args: evalArgs,
+    args: evaluatorArgs(config, prompt, plugin, dir),
     env: { HARNESS_LOOP: '1' },
     traceFile: path.join(ROOT, config.traceDir, `${id}-${stamp()}.evaluator.json`),
     wallClockMs: config.evaluator.wallClockMin * 60_000,
     stream: false,
   })
   const verdict = parseVerdict(ev.result)
-  log(`evaluator finished: ${describeResult(ev)} → ${verdict?.verdict ?? 'no verdict'}`)
+  const missing = noVerdictReason(ev.result, config.evaluator.maxBudgetUsd)
+  log(`evaluator finished: ${describeResult(ev)} → ${verdict?.verdict ?? missing}`)
   if (verdict) for (const line of verdictLines(verdict)) log(`  ${line}`)
-  return { verdict, cost: Number(ev.result?.total_cost_usd ?? 0) }
+  return { verdict, missing, cost: Number(ev.result?.total_cost_usd ?? 0) }
 }
 
 // ---------------------------------------------------------------------------------------
@@ -872,30 +897,40 @@ function projectNotes(p: Project): string {
   return notes ? `\nProject notes (\`${notesFile}\`):\n\n${notes}\n` : ''
 }
 
-/** Arguments of a working session (generator or CI fixer): streamed, plugin loaded, generator caps. */
-function sessionArgs(prompt: string, plugin: string): string[] {
+/**
+ * Arguments of a working session in `dir` (generator, CI or conflict fixer): streamed, plugin
+ * loaded, generator caps.
+ */
+export function sessionArgs(
+  cfg: HarnessConfig,
+  prompt: string,
+  plugin: string,
+  dir: string,
+): string[] {
   return [
     '-p',
     prompt,
     '--plugin-dir',
     plugin,
     '--permission-mode',
-    config.generator.permissionMode,
+    cfg.generator.permissionMode,
     '--permission-prompts',
     'none',
     '--max-turns',
-    String(config.caps.maxTurns),
+    String(cfg.caps.maxTurns),
     '--max-budget-usd',
-    String(config.caps.maxBudgetUsd),
+    String(cfg.caps.maxBudgetUsd),
     '--model',
-    config.generator.model,
-    ...(config.generator.effort ? ['--effort', config.generator.effort] : []),
+    cfg.generator.model,
+    ...(cfg.generator.effort ? ['--effort', cfg.generator.effort] : []),
     '--output-format',
     'stream-json',
     '--verbose',
     '--include-hook-events',
+    ...mcpArgs(dir),
+    // Variadic: everything after it is a tool name, so it stays last.
     '--allowedTools',
-    ...config.allowedTools,
+    ...cfg.allowedTools,
   ]
 }
 
@@ -947,7 +982,7 @@ async function runFeature(
       MAX_ATTEMPTS: String(maxAttempts),
       CONTEXT: context ? `\nContext from the previous attempt:\n${context}\n` : '',
     })
-    const generatorArgs = sessionArgs(prompt, plugin)
+    const generatorArgs = sessionArgs(config, prompt, plugin, dir)
     const env = { HARNESS_LOOP: '1', HARNESS_STOP_GUARD: '1', HARNESS_FEATURE: id }
     const traceFile = path.join(ROOT, config.traceDir, `${id}-${stamp()}.generator.jsonl`)
 
@@ -964,7 +999,7 @@ async function runFeature(
         `would then: post-check (feature status, clean-state --require-terminal, commits ahead of ${defaultBranch()})`,
       )
       console.log(
-        `  claude -p "<evaluator prompt>" --plugin-dir ${plugin} --append-system-prompt "<plugin agents/evaluator.md body>" --tools ${evaluatorAgent(plugin).tools} --permission-mode ${config.generator.permissionMode} --permission-prompts none --max-turns ${config.evaluator.maxTurns} --max-budget-usd ${config.evaluator.maxBudgetUsd} --model ${config.evaluator.model}${config.evaluator.effort ? ` --effort ${config.evaluator.effort}` : ''} --output-format json --json-schema <prompts/evaluator-schema.json>`,
+        `  claude -p "<evaluator prompt>" --plugin-dir ${plugin} --append-system-prompt "<plugin agents/evaluator.md body>" --tools ${evaluatorAgent(plugin).tools} --permission-mode ${config.generator.permissionMode} --permission-prompts none --max-turns ${config.evaluator.maxTurns} --max-budget-usd ${config.evaluator.maxBudgetUsd} --model ${config.evaluator.model}${config.evaluator.effort ? ` --effort ${config.evaluator.effort}` : ''} --output-format json --json-schema <prompts/evaluator-schema.json> ${mcpArgs(dir).join(' ')}`,
       )
       log(
         `would then: merge gate — a branch that changes reviewPaths ${config.review.mode === 'human' ? 'waits for a human' : 'gets a safety review session (hard stops wait for a human)'}`,
@@ -1049,15 +1084,15 @@ async function runFeature(
       `post-check ok: ${id} is ${check.status}, clean-state check passed, ${check.ahead} commit(s) ahead of ${defaultBranch()}`,
     )
 
-    const { verdict, cost: evalCost } = await runEvaluator(id, feature, dir, plugin)
+    const { verdict, missing, cost: evalCost } = await runEvaluator(id, feature, dir, plugin)
     if (stop.signal) return aborted(stop.signal, cost + evalCost)
 
     if (!verdict || verdict.verdict === 'Revise') {
       const findings = verdict
         ? verdictMarkdown(verdict)
-        : 'The evaluator produced no verdict; treat the work as unreviewed and re-verify everything.'
+        : `The evaluator ${missing}; treat the work as unreviewed and re-verify everything.`
       context = `The evaluator asked for revisions:\n${findings}\nAddress every finding, re-run /harness:verify-feature ${id}, then clock out again (AGENTS.md → Clock-out).`
-      recordAttempt(dir, id, `evaluator: ${verdict?.verdict ?? 'no verdict'}`)
+      recordAttempt(dir, id, `evaluator: ${verdict?.verdict ?? missing}`)
       record({
         ts: new Date().toISOString(),
         feature: id,
@@ -1068,7 +1103,7 @@ async function runFeature(
         turns,
         minutes: minutes(),
         trace: traceFile,
-        note: verdict?.required_follow_up.join('; '),
+        note: verdict ? verdict.required_follow_up.join('; ') : `evaluator ${missing}`,
       })
       continue
     }
@@ -1134,7 +1169,7 @@ async function runFeature(
     })
     if (pr && review.length > 0) {
       // Not merged, so dependents stay unready; independent features go on.
-      notify(`${id} PR needs a human review before it merges (${review.join('; ')}): ${pr}`)
+      notify(holdNotice(id, review, pr))
       return 'done'
     }
     if (pr && (config.merge !== 'none' || opts.autoMerge) && opts.wait) {
@@ -1244,9 +1279,7 @@ function publish(
   }
   const body = [
     ...(intake ? [`Closes #${intake.issue} (harness retro).`, ''] : []),
-    ...(review.length > 0
-      ? ['> **Waits for a human review** — not auto-merged:', ...review.map((r) => `> - ${r}`), '']
-      : []),
+    ...holdBanner(review),
     ...(gate.notes.length > 0 ? [...gate.notes, ''] : []),
     `## ${id} — ${feature.title}`,
     '',
@@ -1301,7 +1334,7 @@ function publish(
 // Merge gate (src/review.ts)
 // ---------------------------------------------------------------------------------------
 
-interface Gate {
+export interface Gate {
   /** Why the PR waits for a human; empty when it may auto-merge. */
   hold: string[]
   /** PR body lines for a passed safety review. */
@@ -1357,7 +1390,19 @@ async function reviewGate(
       cost: 0,
     }
   }
-  const { verdict, cost } = await runSafetyReview(id, feature, dir, reasons, files)
+  return safetyGate(reasons, await runSafetyReview(id, feature, dir, reasons, files))
+}
+
+/**
+ * The gate a safety review decides: `safe` passes with its reasons as PR notes; `unsafe` holds
+ * with its reasons, and a review without a verdict holds with why (`missing`: out of budget or
+ * no verdict).
+ */
+export function safetyGate(
+  reasons: string[],
+  review: { verdict?: SafetyVerdict; missing: string; cost: number },
+): Gate {
+  const { verdict, missing, cost } = review
   if (verdict?.verdict === 'safe')
     return {
       hold: [],
@@ -1371,8 +1416,19 @@ async function reviewGate(
     }
   const why = verdict
     ? verdict.reasons.map((r) => `safety review: ${r}`)
-    : ['safety review gave no verdict']
+    : [`safety review ${missing}`]
   return { hold: [...reasons, ...why], notes: [], cost }
+}
+
+/** The PR body's banner for a held PR; empty when nothing holds it. */
+export function holdBanner(hold: string[]): string[] {
+  if (hold.length === 0) return []
+  return ['> **Waits for a human review** — not auto-merged:', ...hold.map((r) => `> - ${r}`), '']
+}
+
+/** The NOTIFY line for a PR that waits for a human review. */
+export function holdNotice(id: string, hold: string[], pr: string): string {
+  return `${id} PR needs a human review before it merges (${hold.join('; ')}): ${pr}`
 }
 
 const MAX_REVIEW_DIFF = 60_000
@@ -1383,11 +1439,11 @@ async function runSafetyReview(
   dir: string,
   reasons: string[],
   files: string[],
-): Promise<{ verdict?: SafetyVerdict; cost: number }> {
+): Promise<{ verdict?: SafetyVerdict; missing: string; cost: number }> {
   const base = defaultBranch()
-  const model = config.review.model ?? config.evaluator.model
-  const effort = config.review.effort ?? config.evaluator.effort
-  log(`=== ${id}: safety review (${model}): ${reasons.join('; ')}`)
+  log(
+    `=== ${id}: safety review (${config.review.model ?? config.evaluator.model}): ${reasons.join('; ')}`,
+  )
   // The files that triggered the review; a safety-flagged issue that touched none gets the full diff.
   const reviewed = files.filter((f) => reviewReasons([f], config.reviewPaths).length > 0)
   let diff = sh('git', ['diff', `${base}...HEAD`, '--', ...reviewed], { cwd: dir, quiet: true }).out
@@ -1404,36 +1460,44 @@ async function runSafetyReview(
   })
   const res = await runClaude({
     cwd: dir,
-    args: [
-      '-p',
-      prompt,
-      '--tools',
-      'Read,Glob,Grep',
-      '--permission-mode',
-      config.generator.permissionMode,
-      '--permission-prompts',
-      'none',
-      '--max-turns',
-      String(config.review.maxTurns),
-      '--max-budget-usd',
-      String(config.review.maxBudgetUsd),
-      '--model',
-      model,
-      ...(effort ? ['--effort', effort] : []),
-      '--output-format',
-      'json',
-      '--json-schema',
-      promptFile('safety-review-schema.json'),
-    ],
+    args: safetyReviewArgs(config, prompt, dir),
     env: { HARNESS_LOOP: '1' },
     traceFile: path.join(ROOT, config.traceDir, `${id}-${stamp()}.safety.json`),
     wallClockMs: config.review.wallClockMin * 60_000,
     stream: false,
   })
   const verdict = parseSafetyVerdict(res.result)
-  log(`safety review finished: ${describeResult(res)} → ${verdict?.verdict ?? 'no verdict'}`)
+  const missing = noVerdictReason(res.result, config.review.maxBudgetUsd)
+  log(`safety review finished: ${describeResult(res)} → ${verdict?.verdict ?? missing}`)
   for (const r of verdict?.reasons ?? []) log(`  ${r.replace(/\s+/g, ' ').slice(0, 200)}`)
-  return { verdict, cost: Number(res.result?.total_cost_usd ?? 0) }
+  return { verdict, missing, cost: Number(res.result?.total_cost_usd ?? 0) }
+}
+
+/** Arguments of a safety-review session in `dir`: read-only tools, the `review` caps. */
+export function safetyReviewArgs(cfg: HarnessConfig, prompt: string, dir: string): string[] {
+  const effort = cfg.review.effort ?? cfg.evaluator.effort
+  return [
+    '-p',
+    prompt,
+    '--tools',
+    'Read,Glob,Grep',
+    '--permission-mode',
+    cfg.generator.permissionMode,
+    '--permission-prompts',
+    'none',
+    '--max-turns',
+    String(cfg.review.maxTurns),
+    '--max-budget-usd',
+    String(cfg.review.maxBudgetUsd),
+    '--model',
+    cfg.review.model ?? cfg.evaluator.model,
+    ...(effort ? ['--effort', effort] : []),
+    '--output-format',
+    'json',
+    '--json-schema',
+    promptFile('safety-review-schema.json'),
+    ...mcpArgs(dir),
+  ]
 }
 
 type WaitResult =
@@ -1657,7 +1721,7 @@ async function shepherdPr(run: PrRun): Promise<'merged' | 'blocked' | 'aborted'>
     )
     const fix = await runClaude({
       cwd: dir,
-      args: sessionArgs(prompt, plugin),
+      args: sessionArgs(config, prompt, plugin, dir),
       env: { HARNESS_LOOP: '1', HARNESS_STOP_GUARD: '1', HARNESS_FEATURE: id },
       traceFile,
       wallClockMs: config.caps.wallClockMin * 60_000,
@@ -1806,11 +1870,11 @@ async function shepherdPr(run: PrRun): Promise<'merged' | 'blocked' | 'aborted'>
       verdict: ev.verdict?.verdict ?? 'none',
       costUsd: total,
       minutes: minutes(),
-      note: note(ev.verdict?.required_follow_up.join('; ') ?? 'no verdict'),
+      note: note(ev.verdict?.required_follow_up.join('; ') ?? `evaluator ${ev.missing}`),
     })
     context = ev.verdict
       ? `The evaluator asked for revisions of your fix:\n${verdictMarkdown(ev.verdict)}\nAddress every finding, re-verify, and commit again.`
-      : 'The evaluator produced no verdict on your fix; re-verify everything before committing again.'
+      : `The evaluator ${ev.missing} on your fix; re-verify everything before committing again.`
   }
 }
 
@@ -2620,7 +2684,17 @@ function preflight(opts: Options) {
     for (const model of new Set([config.generator.model, config.evaluator.model])) {
       const probe = sh(
         'claude',
-        ['-p', 'Reply with: ok', '--model', model, '--max-turns', '1', '--output-format', 'json'],
+        [
+          '-p',
+          'Reply with: ok',
+          '--model',
+          model,
+          '--max-turns',
+          '1',
+          '--output-format',
+          'json',
+          '--strict-mcp-config',
+        ],
         { quiet: true, cwd: tmpdir() },
       )
       let result: { is_error?: boolean; result?: string } = {}
